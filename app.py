@@ -16,6 +16,7 @@ import zipfile
 from pyzbar.pyzbar import decode
 import cv2
 import numpy as np
+import pytesseract # YENİ KÜTÜPHANE
 
 # --- 1. AYARLAR ---
 st.set_page_config(page_title="Muhabese AI", layout="wide", page_icon="🏢")
@@ -48,7 +49,7 @@ if 'hesap_kodlari' not in st.session_state:
         "KDV": "191.18", "Kasa": "100.01", "Banka": "102.01"
     }
 
-# --- 3. MOTORLAR ---
+# --- 3. DOĞRULAMA MOTORU (YENİ: TESSERACT) ---
 def temizle_ve_sayiya_cevir(deger):
     if pd.isna(deger) or deger == "": return 0.0
     try:
@@ -57,6 +58,38 @@ def temizle_ve_sayiya_cevir(deger):
         elif "," in s: s = s.replace(",", ".")
         return float(s)
     except: return 0.0
+
+def ocr_ile_dogrula(image_bytes, ai_tutar):
+    """
+    Tesseract ile ham metni okur ve Gemini'nin bulduğu tutarın
+    metin içinde geçip geçmediğini kontrol eder.
+    """
+    try:
+        # Görüntüyü hazırla
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Griye çevir (OCR başarısını artırır)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Tesseract ile oku
+        ham_metin = pytesseract.image_to_string(gray)
+        
+        # Temizlik: Boşlukları ve noktalamaları kaldırarak kıyasla
+        # Örn: AI "1.200,50" buldu -> "120050" olarak ara
+        # Ham metinde "1 200.50" yazıyor olabilir -> "120050"
+        
+        ai_raw = str(ai_tutar).replace(".", "").replace(",", "")
+        ocr_raw = ham_metin.replace(".", "").replace(",", "").replace(" ", "")
+        
+        if ai_raw in ocr_raw:
+            return "✅ OCR Teyitli"
+        else:
+            # Biraz daha esnek arama (Belki kuruş hatası vardır)
+            return "🚩 Şüpheli (OCR Bulamadı)"
+            
+    except Exception as e:
+        return "⚠️ OCR Hatası"
 
 def muhasebe_fisne_cevir(df_ham):
     hk = st.session_state['hesap_kodlari']
@@ -68,11 +101,13 @@ def muhasebe_fisne_cevir(df_ham):
             matrah = toplam - kdv
             tarih = str(row.get('tarih', datetime.now().strftime('%d.%m.%Y')))
             kategori = row.get('kategori', 'Diğer')
+            
             gider_kodu = hk.get(kategori, hk["Diğer"])
             aciklama = f"{kategori} - {row.get('isyeri_adi', 'Evrak')}"
             
             if matrah > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": gider_kodu, "Açıklama": aciklama, "Borç": matrah, "Alacak": 0})
             if kdv > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": hk["KDV"], "Açıklama": "KDV", "Borç": kdv, "Alacak": 0})
+            
             alacak_hesabi = hk["Banka"] if "Ekstre" in str(row.get('dosya_adi','')) else hk["Kasa"]
             yevmiye.append({"Tarih": tarih, "Hesap Kodu": alacak_hesabi, "Açıklama": "Ödeme", "Borç": 0, "Alacak": toplam})
         except: continue
@@ -92,7 +127,6 @@ def musteri_listesini_getir():
     client = sheets_baglantisi_kur()
     if not client: return ["Varsayılan Müşteri"]
     try:
-        # Veritabanı adı değişti: Muhabese Veritabanı
         sheet = client.open("Muhabese Veritabanı")
         try: ws = sheet.worksheet("Musteriler")
         except: ws = sheet.add_worksheet("Musteriler", 100, 2); ws.append_row(["Müşteri", "Tarih"]); ws.append_row(["Varsayılan Müşteri", str(datetime.now())])
@@ -107,7 +141,7 @@ def yeni_musteri_ekle(ad):
         ws = sheet.worksheet("Musteriler")
         if ad in ws.col_values(1): return "Mevcut"
         ws.append_row([ad, str(datetime.now())])
-        try: sheet.add_worksheet(ad, 1000, 10).append_row(["Dosya", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR"])
+        try: sheet.add_worksheet(ad, 1000, 10).append_row(["Dosya", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR", "Güven"])
         except: pass
         return True
     except Exception as e: return str(e)
@@ -136,7 +170,10 @@ def sheete_kaydet(veri, musteri):
         for v in veri:
             durum = "✅" if float(str(v.get('toplam_tutar',0)).replace(',','.')) > 0 else "⚠️"
             qr_durumu = "📱QR" if v.get("qr_gecerli") else "-"
-            rows.append([v.get("dosya_adi"), v.get("isyeri_adi"), v.get("fiş_no"), v.get("tarih"), v.get("kategori", "Diğer"), str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum, qr_durumu])
+            # Güven Skorunu Ekle
+            guven = v.get("guven_skoru", "-")
+            
+            rows.append([v.get("dosya_adi"), v.get("isyeri_adi"), v.get("fiş_no"), v.get("tarih"), v.get("kategori", "Diğer"), str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum, qr_durumu, guven])
         ws.append_rows(rows)
         return True
     except: return False
@@ -156,7 +193,7 @@ def sheetten_veri_cek(musteri):
         return df
     except: return pd.DataFrame()
 
-# --- 5. GEMINI & QR ---
+# --- 5. GEMINI & QR & TESSERACT ---
 @st.cache_data
 def modelleri_getir():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
@@ -192,6 +229,7 @@ def dosyayi_hazirla(uploaded_file):
 def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
     try:
         qr_data = None
+        # QR ve OCR sadece resimlerde çalışır
         if dosya_objesi.type != "application/pdf":
             qr_data = qr_kodu_oku_ve_filtrele(dosya_objesi.getvalue())
         
@@ -199,21 +237,12 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{secilen_model}:generateContent?key={API_KEY}"
         headers = {'Content-Type': 'application/json'}
         
-        qr_bilgisi = ""
-        if qr_data:
-            qr_bilgisi = f"\n[İPUCU]: Belgede resmi bir QR kod bulundu: '{qr_data}'. Eğer içinde tutar/tarih varsa bunu kullan."
+        qr_bilgisi = f"\n[İPUCU]: QR kod bulundu: '{qr_data}'" if qr_data else ""
 
         if mod == "fis":
-            prompt = f"""Bu belgeyi bir Mali Müşavir hassasiyetiyle analiz et. {qr_bilgisi}
-            GÖREVİN: Harcamanın gerçek "Kategori"sini bulmak.
-            
-            DİKKAT ETMEN GEREKEN TUZAKLAR:
-            1. Firma Adına Aldanma: "Ofel Turizm" yazabilir ama logo "HepEğitim" ise ve ürün "Alice" ise bu bir KİTAPTIR (Kırtasiye).
-            2. Vergi Kodlarına Bak: Faturanın altında "13/n Maddesi" veya "KDV İstisnası" yazıyorsa bu genellikle Kitap/Yayın demektir.
-            3. Ürün Adını Yorumla: "Alice" bir kitap ismidir. "Benzin", "Motorin" akaryakıttır. "Adana Kebap" gıdadır.
-            
+            prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
+            Dikkat: Firma adında Turizm geçse bile satılan ürüne (Kitap vb.) göre Kategori belirle.
             JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
-            Tarih formatı Gün.Ay.Yıl olsun.
             """
         else:
             prompt = """Kredi kartı ekstresi satırları. JSON Liste: [{"isyeri_adi": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0"}, ...]"""
@@ -225,17 +254,26 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
         metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
         veri = json.loads(metin)
         
-        if isinstance(veri, list):
-            for v in veri: 
-                v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"
-                v["qr_gecerli"] = False
+        # --- DOĞRULAMA AŞAMASI ---
+        if isinstance(veri, list): # Ekstre
+            for v in veri: v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"; v["guven_skoru"] = "-"
             return veri
-        else:
+        else: # Fiş
             veri["dosya_adi"] = dosya_objesi.name
             veri["qr_gecerli"] = True if qr_data else False
+            
+            # OCR İLE ÇAPRAZ KONTROL (Sadece Resimse)
+            if dosya_objesi.type != "application/pdf":
+                # Gemini'nin bulduğu tutarı OCR ile teyit et
+                guven_durumu = ocr_ile_dogrula(dosya_objesi.getvalue(), veri.get("toplam_tutar", "0"))
+                veri["guven_skoru"] = guven_durumu
+            else:
+                veri["guven_skoru"] = "PDF (OCR Yok)"
+
             veri["_ham_dosya"] = dosya_objesi.getvalue()
             veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
             return veri
+            
     except Exception as e: return {"hata": str(e)}
 
 def arsiv_olustur(veri_listesi):
@@ -244,7 +282,7 @@ def arsiv_olustur(veri_listesi):
         for veri in veri_listesi:
             if "_ham_dosya" in veri:
                 try:
-                    tarih = veri.get("tarih", "00.00.0000").replace("/", ".").replace("-", ".")
+                    tarih = veri.get("tarih", "00.00.0000").replace("/", ".")
                     yer = "".join([c for c in veri.get("isyeri_adi","").upper() if c.isalnum()])[:10]
                     tutar = str(veri.get("toplam_tutar", "0")).replace(".", ",")
                     ad = f"{tarih}_{yer}_{tutar}TL.{veri.get('_dosya_turu','jpg')}"
@@ -266,7 +304,6 @@ with st.sidebar:
             res = yeni_musteri_ekle(yeni)
             if res==True: st.success("Eklendi!"); time.sleep(1); st.rerun()
             else: st.error(res)
-        
         sil = st.selectbox("Silinecek", [m for m in musteriler if m!="Varsayılan Müşteri"])
         if st.button("Sil"):
             musteri_sil(sil)
@@ -276,7 +313,6 @@ with st.sidebar:
     modeller = modelleri_getir()
     model = st.selectbox("AI Modeli", modeller) if modeller else "gemini-1.5-flash"
     hiz = st.slider("Hız", 1, 5, 3)
-    
     if st.button("❌ Temizle"):
         st.session_state['uploader_key'] += 1
         if 'analiz_sonuclari' in st.session_state: del st.session_state['analiz_sonuclari']
@@ -301,7 +337,6 @@ with t1:
                     r = f.result()
                     if "hata" not in r: tum.append(r)
                     bar.progress(100)
-        
         if ekstre:
             with st.spinner("Ekstre okunuyor..."):
                 for d in ekstre:
@@ -342,7 +377,12 @@ with t3:
     with c1:
         hk["Gıda"] = st.text_input("Gıda", hk["Gıda"])
         hk["Ulaşım"] = st.text_input("Ulaşım", hk["Ulaşım"])
+        hk["Kırtasiye"] = st.text_input("Kırtasiye", hk["Kırtasiye"])
+        hk["KDV"] = st.text_input("KDV (191)", hk["KDV"])
     with c2:
-        hk["KDV"] = st.text_input("KDV", hk["KDV"])
+        hk["Teknoloji"] = st.text_input("Teknoloji", hk["Teknoloji"])
+        hk["Konaklama"] = st.text_input("Konaklama", hk["Konaklama"])
+        hk["Diğer"] = st.text_input("Diğer", hk["Diğer"])
         hk["Kasa"] = st.text_input("Kasa", hk["Kasa"])
+        hk["Banka"] = st.text_input("Banka (102)", hk["Banka"])
     if st.button("Kaydet"): st.success("Kaydedildi!")
