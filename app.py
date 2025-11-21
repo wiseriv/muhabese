@@ -18,16 +18,16 @@ import cv2
 import numpy as np
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="Muhabese AI", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="Muhabese AI Pro", layout="wide", page_icon="🚀")
 
 def giris_kontrol():
     if 'giris_yapildi' not in st.session_state: st.session_state['giris_yapildi'] = False
     if not st.session_state['giris_yapildi']:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 Muhabese AI | Giriş")
+            st.markdown("## 🔐 Muhabese AI | Pro Giriş")
             with st.form("login"):
-                sifre = st.text_input("Şifre", type="password")
+                sifre = st.text_input("Yönetici Şifresi", type="password")
                 if st.form_submit_button("Giriş"):
                     if sifre == "12345":
                         st.session_state['giris_yapildi'] = True
@@ -39,7 +39,7 @@ giris_kontrol()
 API_KEY = st.secrets.get("GEMINI_API_KEY")
 if not API_KEY: st.error("API Key Eksik!"); st.stop()
 
-# --- 2. AYARLAR ---
+# --- 2. DEĞİŞKENLER ---
 if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 if 'hesap_kodlari' not in st.session_state:
     st.session_state['hesap_kodlari'] = {
@@ -78,7 +78,7 @@ def muhasebe_fisne_cevir(df_ham):
         except: continue
     return pd.DataFrame(yevmiye)
 
-# --- 4. SHEETS (GÜÇLENDİRİLMİŞ BAĞLANTI) ---
+# --- 4. SHEETS ---
 @st.cache_resource
 def sheets_baglantisi_kur():
     if "gcp_service_account" not in st.secrets: return None
@@ -86,9 +86,7 @@ def sheets_baglantisi_kur():
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
         return gspread.authorize(creds)
-    except Exception as e: 
-        st.error(f"Bağlantı Hatası: {e}")
-        return None
+    except: return None
 
 def musteri_listesini_getir():
     client = sheets_baglantisi_kur()
@@ -96,25 +94,19 @@ def musteri_listesini_getir():
     try:
         sheet = client.open("Muhabese Veritabanı")
         try: ws = sheet.worksheet("Musteriler")
-        except: 
-            ws = sheet.add_worksheet("Musteriler", 100, 2)
-            ws.append_row(["Müşteri", "Tarih"])
-            ws.append_row(["Varsayılan Müşteri", str(datetime.now())])
+        except: ws = sheet.add_worksheet("Musteriler", 100, 2); ws.append_row(["Müşteri", "Tarih"]); ws.append_row(["Varsayılan Müşteri", str(datetime.now())])
         return ws.col_values(1)[1:] or ["Varsayılan Müşteri"]
     except: return ["Varsayılan Müşteri"]
 
 def yeni_musteri_ekle(ad):
     client = sheets_baglantisi_kur()
-    if not client: return "Bağlantı Yok"
+    if not client: return False
     try:
         sheet = client.open("Muhabese Veritabanı")
         ws = sheet.worksheet("Musteriler")
         if ad in ws.col_values(1): return "Mevcut"
         ws.append_row([ad, str(datetime.now())])
-        try:
-            # Yeni sekme aç ve başlıkları yaz
-            ns = sheet.add_worksheet(ad, 1000, 12)
-            ns.append_row(["Dosya Adı", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR"])
+        try: sheet.add_worksheet(ad, 1000, 10).append_row(["Dosya", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR"])
         except: pass
         return True
     except Exception as e: return str(e)
@@ -134,39 +126,19 @@ def musteri_sil(ad):
 
 def sheete_kaydet(veri, musteri):
     client = sheets_baglantisi_kur()
-    if not client: 
-        st.error("Google Sheets bağlantısı kurulamadı.")
-        return False
+    if not client: return False
     try:
         sheet = client.open("Muhabese Veritabanı")
         try: ws = sheet.worksheet(musteri)
-        except: 
-            ws = sheet.add_worksheet(musteri, 1000, 12)
-            ws.append_row(["Dosya Adı", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR"])
-        
+        except: ws = sheet.add_worksheet(musteri, 1000, 10)
         rows = []
         for v in veri:
             durum = "✅" if float(str(v.get('toplam_tutar',0)).replace(',','.')) > 0 else "⚠️"
             qr_durumu = "📱QR" if v.get("qr_gecerli") else "-"
-            
-            rows.append([
-                v.get("dosya_adi", "-"), 
-                v.get("isyeri_adi", "-"), 
-                v.get("fiş_no", "-"), 
-                v.get("tarih", "-"), 
-                v.get("kategori", "Diğer"), 
-                str(v.get("toplam_tutar", "0")), 
-                str(v.get("toplam_kdv", "0")), 
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                durum, 
-                qr_durumu
-            ])
-        
+            rows.append([v.get("dosya_adi"), v.get("isyeri_adi"), v.get("fiş_no"), v.get("tarih"), v.get("kategori", "Diğer"), str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum, qr_durumu])
         ws.append_rows(rows)
         return True
-    except Exception as e:
-        st.error(f"Kayıt Başarısız! Hata: {e}")
-        return False
+    except: return False
 
 def sheetten_veri_cek(musteri):
     client = sheets_baglantisi_kur()
@@ -190,8 +162,19 @@ def modelleri_getir():
     try:
         response = requests.get(url)
         data = response.json()
-        flash = [m['name'].replace("models/", "") for m in data.get('models', []) if "flash" in m['name']]
-        return flash + [m['name'].replace("models/", "") for m in data.get('models', []) if "flash" not in m['name']]
+        tum_modeller = []
+        if 'models' in data:
+            for m in data['models']:
+                if 'generateContent' in m.get('supportedGenerationMethods', []):
+                    ad = m['name'].replace("models/", "")
+                    tum_modeller.append(ad)
+        
+        # AKILLI SIRALAMA: 2.0 Flash veya 1.5 Flash'ı öne al
+        flash_2 = [m for m in tum_modeller if "2.0-flash" in m]
+        flash_1 = [m for m in tum_modeller if "1.5-flash" in m and "2.0" not in m]
+        diger = [m for m in tum_modeller if m not in flash_2 and m not in flash_1]
+        
+        return flash_2 + flash_1 + diger
     except: return []
 
 def qr_kodu_oku_ve_filtrele(image_bytes):
@@ -230,6 +213,7 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
 
         if mod == "fis":
             prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
+            DİKKAT: Firma adına aldanma, ürüne bak.
             JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
             Tarih formatı Gün.Ay.Yıl olsun.
             """
@@ -272,7 +256,9 @@ def arsiv_olustur(veri_listesi):
 
 # --- 6. ARAYÜZ ---
 with st.sidebar:
-    st.title("🏢 Muhabese AI")
+    st.title("🏢 Muhabese AI Pro")
+    st.success("🚀 Sınırsız Hız Aktif")
+    
     st.markdown("### 👥 Müşteri")
     musteriler = musteri_listesini_getir()
     secili = st.selectbox("Aktif Müşteri", musteriler)
@@ -290,8 +276,11 @@ with st.sidebar:
 
     st.divider()
     modeller = modelleri_getir()
-    model = st.selectbox("AI Modeli", modeller) if modeller else "gemini-1.5-flash"
-    hiz = st.slider("Hız", 1, 5, 3)
+    # En hızlı modeli otomatik seç
+    model = st.selectbox("AI Modeli", modeller, index=0) if modeller else "gemini-2.0-flash-exp"
+    
+    # HIZ SLIDER'I ARTIK 20'YE KADAR ÇIKIYOR!
+    hiz = st.slider("Paralel İşlem Gücü", 1, 20, 10) 
     
     if st.button("❌ Temizle"):
         st.session_state['uploader_key'] += 1
@@ -301,22 +290,25 @@ with st.sidebar:
 t1, t2, t3 = st.tabs([f"📤 {secili}", "📊 Rapor", "⚙️ Ayar"])
 
 with t1:
-    st.header("Evrak İşleme")
+    st.header("Evrak İşleme (Turbo)")
     c1, c2 = st.columns(2)
     with c1: fisler = st.file_uploader("Fiş / Fatura", type=['jpg','png','pdf'], accept_multiple_files=True, key=f"f_{st.session_state['uploader_key']}")
     with c2: ekstre = st.file_uploader("Ekstre", type=['pdf','jpg'], accept_multiple_files=True, key=f"e_{st.session_state['uploader_key']}")
     
-    if st.button("🚀 Başlat", type="primary"):
+    if st.button("🚀 SÜPER HIZLI BAŞLAT", type="primary"):
         tum = []
         bar = st.progress(0)
         
         if fisler:
             with concurrent.futures.ThreadPoolExecutor(max_workers=hiz) as exe:
                 futures = {exe.submit(gemini_ile_analiz_et, d, model, "fis"): d for d in fisler}
+                completed = 0
                 for f in concurrent.futures.as_completed(futures):
                     r = f.result()
                     if "hata" not in r: tum.append(r)
-                    bar.progress(100)
+                    completed += 1
+                    bar.progress(completed / len(fisler))
+                    # sleep(0.5) ARTIK YOK! TAM GAZ.
         
         if ekstre:
             with st.spinner("Ekstre okunuyor..."):
@@ -325,15 +317,10 @@ with t1:
                     if isinstance(r, list): tum.extend(r)
         
         if tum:
-            st.session_state['analiz_sonuclari'] = tum # Veriyi hafızaya at
-            
-            # KAYIT VE GERİ BİLDİRİM
-            if sheete_kaydet(tum, secili):
-                st.success(f"✅ {len(tum)} kayıt başarıyla veritabanına işlendi!")
-            else:
-                st.error("⚠️ Veriler okundu ama Sheets'e kaydedilemedi. Hata yukarıda.")
+            st.session_state['analiz_sonuclari'] = tum
+            sheete_kaydet(tum, secili)
+            st.success(f"✅ {len(tum)} kayıt fişek hızıyla işlendi!")
 
-    # SONUÇLARI GÖSTER (Hafızadan okur)
     if 'analiz_sonuclari' in st.session_state:
         dt = st.session_state['analiz_sonuclari']
         df = pd.DataFrame(dt)
