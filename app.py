@@ -65,7 +65,7 @@ def muhasebe_fisne_cevir(df_ham):
             tarih = str(row.get('tarih', datetime.now().strftime('%d.%m.%Y')))
             kategori = row.get('kategori', 'Diğer')
             
-            # Kategoriye göre hesap kodu seç (Eşleşmezse Diğer'i al)
+            # Kategoriye göre hesap kodu seç
             gider_kodu = hk.get(kategori, hk["Diğer"])
             
             aciklama = f"{kategori} - {row.get('isyeri_adi', 'Evrak')}"
@@ -170,32 +170,14 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
         metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
         veri = json.loads(metin)
         
-        # Eğer liste geldiyse (Ekstre), her birine dosya adı ekle
         if isinstance(veri, list):
             for v in veri: v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"
-            return veri # Liste döner
+            return veri
         else:
             veri["dosya_adi"] = dosya_objesi.name
-            return veri # Tek obje döner
+            return veri
             
     except Exception as e: return {"hata": str(e)}
-
-def chat_with_data(soru, df):
-    """Verilerle sohbet etmeni sağlar."""
-    try:
-        # Veri özetini oluştur
-        ozet = df.to_string(index=False, max_rows=30) # İlk 30 satırı verelim ki token şişmesin
-        prompt = f"""Aşağıdaki muhasebe verilerine göre soruyu cevapla. Türkçe konuş.
-        Veri:
-        {ozet}
-        
-        Soru: {soru}
-        """
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        response = requests.post(url, headers={'Content-Type': 'application/json'}, json=payload)
-        return response.json()['candidates'][0]['content']['parts'][0]['text']
-    except: return "Üzgünüm, şu an cevap veremiyorum."
 
 # --- 6. ARAYÜZ ---
 with st.sidebar:
@@ -209,7 +191,8 @@ with st.sidebar:
         st.session_state['uploader_key'] = st.session_state.get('uploader_key', 0) + 1
         st.rerun()
 
-tab1, tab2, tab3, tab4 = st.tabs(["📤 Fiş/Fatura", "💳 Kredi Kartı Ekstresi", "⚙️ Ayarlar", "💬 Asistan"])
+# ASİSTAN SEKMESİ KALDIRILDI, SADECE 3 SEKME KALDI
+tab1, tab2, tab3 = st.tabs(["📤 Fiş/Fatura", "💳 Kredi Kartı Ekstresi", "⚙️ Ayarlar"])
 
 # --- TAB 1: FİŞ ---
 with tab1:
@@ -240,7 +223,7 @@ with tab1:
                 with pd.ExcelWriter(buf, engine='openpyxl') as writer: df_muh.to_excel(writer, index=False)
                 st.download_button("📥 Fiş İndir", buf.getvalue(), "muhasebe.xlsx", "primary")
 
-# --- TAB 2: EKSTRE (YENİ) ---
+# --- TAB 2: EKSTRE ---
 with tab2:
     st.header("Kredi Kartı Ekstresi Çözümleme")
     st.info("PDF veya Resim formatındaki ekstreleri yükleyin. Tüm satırlar ayrıştırılacaktır.")
@@ -257,26 +240,18 @@ with tab2:
         if tum_satirlar:
             df_ekstre = pd.DataFrame(tum_satirlar)
             st.success(f"✅ Toplam {len(tum_satirlar)} işlem bulundu!")
-            
-            # Veritabanına Kayıt
-            if sheete_kaydet(tum_satirlar): st.toast("Veritabanına eklendi")
-            
+            sheete_kaydet(tum_satirlar)
             st.dataframe(df_ekstre, use_container_width=True)
             
-            # Muhasebe Fişi (Ekstre için)
             df_muh_ekstre = muhasebe_fisne_cevir(df_ekstre)
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='openpyxl') as writer: df_muh_ekstre.to_excel(writer, index=False)
             st.download_button("📥 Ekstre Muhasebe Fişi İndir", buf.getvalue(), "ekstre_muhasebe.xlsx", "primary")
 
-# --- TAB 3: AYARLAR (YENİ) ---
+# --- TAB 3: AYARLAR ---
 with tab3:
     st.header("⚙️ Hesap Planı Ayarları")
-    st.caption("Gider kategorilerinin hangi muhasebe koduna gideceğini buradan belirleyin.")
-    
     col1, col2 = st.columns(2)
-    
-    # Mevcut ayarları göster ve düzenlet
     yeni_kodlar = st.session_state['hesap_kodlari'].copy()
     
     with col1:
@@ -294,31 +269,4 @@ with tab3:
 
     if st.button("💾 Ayarları Kaydet"):
         st.session_state['hesap_kodlari'] = yeni_kodlar
-        st.success("Ayarlar güncellendi! Sonraki işlemlerde bu kodlar kullanılacak.")
-
-# --- TAB 4: ASİSTAN (YENİ) ---
-with tab4:
-    st.header("💬 Finans Asistanı")
-    st.caption("Verilerinize soru sorun. Örn: 'Geçen ay en çok nereye harcama yaptım?'")
-    
-    df_chat = sheetten_veri_cek()
-    if not df_chat.empty:
-        soru = st.chat_input("Sorunuzu buraya yazın...")
-        
-        # Geçmiş mesajları göster (Basit versiyon)
-        if "messages" not in st.session_state: st.session_state.messages = []
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]): st.markdown(msg["content"])
-            
-        if soru:
-            # Kullanıcı mesajı
-            with st.chat_message("user"): st.markdown(soru)
-            st.session_state.messages.append({"role": "user", "content": soru})
-            
-            # AI Cevabı
-            with st.chat_message("assistant"):
-                cevap = chat_with_data(soru, df_chat)
-                st.markdown(cevap)
-            st.session_state.messages.append({"role": "assistant", "content": cevap})
-    else:
-        st.info("Sohbet edebilmek için önce veritabanında veri olması gerekir.")
+        st.success("Ayarlar güncellendi!")
