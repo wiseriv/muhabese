@@ -33,6 +33,10 @@ giris_kontrol()
 API_KEY = st.secrets.get("GEMINI_API_KEY")
 if not API_KEY: st.error("API Key Eksik!"); st.stop()
 
+# --- YENİ ÖZELLİK: DOSYA KUTUSU SIFIRLAYICI ---
+if 'uploader_key' not in st.session_state:
+    st.session_state['uploader_key'] = 0
+
 # --- 3. MOTORLAR ---
 def temizle_ve_sayiya_cevir(deger):
     if pd.isna(deger) or deger == "": return 0.0
@@ -160,24 +164,35 @@ def arsiv_olustur(veri_listesi):
                     zip_file.writestr(f"HATA_{veri.get('dosya_adi')}", veri["_ham_dosya"])
     return zip_buffer.getvalue()
 
-# --- 6. ARAYÜZ (PERSISTENT STATE İLE) ---
+# --- 6. ARAYÜZ (KEY TRICK İLE) ---
 with st.sidebar:
     st.markdown("### 💼 Mihsap AI Pro")
     modeller = modelleri_getir()
     secilen_model = st.selectbox("Model", modeller) if modeller else "gemini-1.5-flash"
     hiz = st.slider("Hız", 1, 5, 3)
+    
+    # --- TEMİZLEME BUTONU (GÜNCELLENDİ) ---
     if st.button("❌ Ekranı Temizle"):
+        # 1. Sonuçları sil
         if 'analiz_sonuclari' in st.session_state:
             del st.session_state['analiz_sonuclari']
+        # 2. Dosya kutusunun ID'sini değiştir (Bu onu sıfırlar)
+        st.session_state['uploader_key'] += 1
         st.rerun()
 
 tab1, tab2 = st.tabs(["📤 Evrak Yükle", "📊 Raporlar"])
 
 with tab1:
     st.header("Evrak İşleme")
-    dosyalar = st.file_uploader("Dosyaları Bırakın", type=['jpg', 'png', 'jpeg', 'pdf'], accept_multiple_files=True)
     
-    # --- BUTON LOGİĞİ (DEĞİŞTİ) ---
+    # DİKKAT: key parametresi dinamik oldu
+    dosyalar = st.file_uploader(
+        "Dosyaları Bırakın", 
+        type=['jpg', 'png', 'jpeg', 'pdf'], 
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state['uploader_key']}" 
+    )
+    
     if dosyalar and st.button("🚀 İşlemi Başlat", type="primary"):
         tum_veriler = []
         bar = st.progress(0)
@@ -192,7 +207,6 @@ with tab1:
                 bar.progress(completed / len(dosyalar))
                 time.sleep(0.5)
         
-        # VERİYİ HAFIZAYA (SESSION STATE) KAYDET
         if tum_veriler:
             st.session_state['analiz_sonuclari'] = tum_veriler
             sheete_kaydet(tum_veriler)
@@ -200,8 +214,6 @@ with tab1:
         else:
             st.error("Hiçbir veri işlenemedi.")
 
-    # --- SONUÇ GÖSTERİMİ (HAFIZADAN OKUR) ---
-    # Butona basılmasa bile, hafızada veri varsa gösterir
     if 'analiz_sonuclari' in st.session_state and st.session_state['analiz_sonuclari']:
         veriler = st.session_state['analiz_sonuclari']
         df = pd.DataFrame(veriler)
@@ -210,10 +222,7 @@ with tab1:
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("### 📂 Arşiv (ZIP)")
-            st.info("Dosyalar otomatik isimlendirildi.")
             zip_data = arsiv_olustur(veriler)
-            
-            # İŞTE SİHİR BURADA: Butona bassan da bu blok 'if' içinde olduğu için kaybolmaz
             st.download_button("📦 Arşivi İndir (ZIP)", zip_data, "arsiv.zip", "application/zip", type="primary")
 
         with col2:
