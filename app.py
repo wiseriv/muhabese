@@ -18,16 +18,16 @@ import cv2
 import numpy as np
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="Muhabese AI Pro", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="Muhabese AI", layout="wide", page_icon="🏢")
 
 def giris_kontrol():
     if 'giris_yapildi' not in st.session_state: st.session_state['giris_yapildi'] = False
     if not st.session_state['giris_yapildi']:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("## 🔐 Muhabese AI | Pro Giriş")
+            st.markdown("## 🔐 Muhabese AI | Giriş")
             with st.form("login"):
-                sifre = st.text_input("Yönetici Şifresi", type="password")
+                sifre = st.text_input("Şifre", type="password")
                 if st.form_submit_button("Giriş"):
                     if sifre == "12345":
                         st.session_state['giris_yapildi'] = True
@@ -39,7 +39,7 @@ giris_kontrol()
 API_KEY = st.secrets.get("GEMINI_API_KEY")
 if not API_KEY: st.error("API Key Eksik!"); st.stop()
 
-# --- 2. DEĞİŞKENLER ---
+# --- 2. AYARLAR ---
 if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 if 'hesap_kodlari' not in st.session_state:
     st.session_state['hesap_kodlari'] = {
@@ -155,34 +155,16 @@ def sheetten_veri_cek(musteri):
         return df
     except: return pd.DataFrame()
 
-# --- 5. GEMINI (2.5 ÖNCELİKLİ) ---
+# --- 5. GEMINI & QR ---
 @st.cache_data
 def modelleri_getir():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
         response = requests.get(url)
         data = response.json()
-        tum_modeller = []
-        if 'models' in data:
-            for m in data['models']:
-                if 'generateContent' in m.get('supportedGenerationMethods', []):
-                    ad = m['name'].replace("models/", "")
-                    tum_modeller.append(ad)
-        
-        # --- YENİ SIRALAMA MANTIĞI ---
-        # 1. Öncelik: 2.5 Flash
-        # 2. Öncelik: 2.0 Flash
-        # 3. Öncelik: 1.5 Flash
-        flash_2_5 = [m for m in tum_modeller if "2.5-flash" in m]
-        flash_2_0 = [m for m in tum_modeller if "2.0-flash" in m]
-        flash_1_5 = [m for m in tum_modeller if "1.5-flash" in m]
-        diger = [m for m in tum_modeller if m not in flash_2_5 and m not in flash_2_0 and m not in flash_1_5]
-        
-        # En yenileri başa koy
-        return flash_2_5 + flash_2_0 + flash_1_5 + diger
-    except: 
-        # Hata olursa manuel listeyi döndür
-        return ["gemini-2.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-flash"]
+        flash = [m['name'].replace("models/", "") for m in data.get('models', []) if "flash" in m['name']]
+        return flash + [m['name'].replace("models/", "") for m in data.get('models', []) if "flash" not in m['name']]
+    except: return []
 
 def qr_kodu_oku_ve_filtrele(image_bytes):
     try:
@@ -206,46 +188,54 @@ def dosyayi_hazirla(uploaded_file):
     img.save(buf, "JPEG", quality=80)
     return base64.b64encode(buf.getvalue()).decode('utf-8'), "image/jpeg"
 
-def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
-    try:
-        qr_data = None
-        if dosya_objesi.type != "application/pdf":
-            qr_data = qr_kodu_oku_ve_filtrele(dosya_objesi.getvalue())
-        
-        base64_data, mime_type = dosyayi_hazirla(dosya_objesi)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{secilen_model}:generateContent?key={API_KEY}"
-        headers = {'Content-Type': 'application/json'}
-        
-        qr_bilgisi = f"\n[İPUCU]: QR kod bulundu: '{qr_data}'" if qr_data else ""
+def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis", retries=3):
+    # --- YENİ RETRY (TEKRAR DENEME) MEKANİZMASI ---
+    for attempt in range(retries):
+        try:
+            qr_data = None
+            if dosya_objesi.type != "application/pdf":
+                qr_data = qr_kodu_oku_ve_filtrele(dosya_objesi.getvalue())
+            
+            base64_data, mime_type = dosyayi_hazirla(dosya_objesi)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{secilen_model}:generateContent?key={API_KEY}"
+            headers = {'Content-Type': 'application/json'}
+            
+            qr_bilgisi = f"\n[İPUCU]: QR kod bulundu: '{qr_data}'" if qr_data else ""
 
-        if mod == "fis":
-            prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
-            DİKKAT: Firma adına aldanma, ürüne bak.
-            JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
-            Tarih formatı Gün.Ay.Yıl olsun.
-            """
-        else:
-            prompt = """Kredi kartı ekstresi satırları. JSON Liste: [{"isyeri_adi": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0"}, ...]"""
+            if mod == "fis":
+                prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
+                JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
+                Tarih formatı Gün.Ay.Yıl olsun.
+                """
+            else:
+                prompt = """Kredi kartı ekstresi. JSON Liste: [{"isyeri_adi": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0"}, ...]"""
 
-        payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code != 200: return {"hata": "API Hatası"}
-        
-        metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
-        veri = json.loads(metin)
-        
-        if isinstance(veri, list):
-            for v in veri: 
-                v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"
-                v["qr_gecerli"] = False
-            return veri
-        else:
-            veri["dosya_adi"] = dosya_objesi.name
-            veri["qr_gecerli"] = True if qr_data else False
-            veri["_ham_dosya"] = dosya_objesi.getvalue()
-            veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
-            return veri
-    except Exception as e: return {"hata": str(e)}
+            payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
+            response = requests.post(url, headers=headers, json=payload)
+            
+            # 429 HATASI ALIRSAK BEKLE VE TEKRAR DENE
+            if response.status_code == 429:
+                time.sleep(2 ** (attempt + 1)) # Üstel bekleme (2sn, 4sn, 8sn)
+                continue 
+            
+            if response.status_code != 200: return {"hata": "API Hatası"}
+            
+            metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
+            veri = json.loads(metin)
+            
+            if isinstance(veri, list):
+                for v in veri: v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"; v["qr_gecerli"] = False
+                return veri
+            else:
+                veri["dosya_adi"] = dosya_objesi.name
+                veri["qr_gecerli"] = True if qr_data else False
+                veri["_ham_dosya"] = dosya_objesi.getvalue()
+                veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
+                return veri
+                
+        except Exception as e: return {"hata": str(e)}
+    
+    return {"hata": "Kota limiti nedeniyle işlem yapılamadı."}
 
 def arsiv_olustur(veri_listesi):
     zip_buffer = io.BytesIO()
@@ -263,8 +253,7 @@ def arsiv_olustur(veri_listesi):
 
 # --- 6. ARAYÜZ ---
 with st.sidebar:
-    st.title("🏢 Muhabese AI Pro")
-    st.success("🚀 Sınırsız Hız (2.5 Flash)")
+    st.title("🏢 Muhabese AI")
     
     st.markdown("### 👥 Müşteri")
     musteriler = musteri_listesini_getir()
@@ -283,11 +272,10 @@ with st.sidebar:
 
     st.divider()
     modeller = modelleri_getir()
-    # BURASI OTOMATİK OLARAK LİSTENİN İLKİNİ (2.5 FLASH) SEÇECEK
-    model = st.selectbox("AI Modeli", modeller, index=0)
+    model = st.selectbox("AI Modeli", modeller) if modeller else "gemini-1.5-flash"
     
-    # HIZ SLIDER'I ARTIK 20'YE KADAR
-    hiz = st.slider("Paralel İşlem Gücü", 1, 20, 10) 
+    # HIZ AYARINI DÜŞÜR (GÜVENLİ LİMİT)
+    hiz = st.slider("Hız", 1, 10, 5) 
     
     if st.button("❌ Temizle"):
         st.session_state['uploader_key'] += 1
@@ -297,12 +285,12 @@ with st.sidebar:
 t1, t2, t3 = st.tabs([f"📤 {secili}", "📊 Rapor", "⚙️ Ayar"])
 
 with t1:
-    st.header("Evrak İşleme (Turbo)")
+    st.header("Evrak İşleme")
     c1, c2 = st.columns(2)
     with c1: fisler = st.file_uploader("Fiş / Fatura", type=['jpg','png','pdf'], accept_multiple_files=True, key=f"f_{st.session_state['uploader_key']}")
     with c2: ekstre = st.file_uploader("Ekstre", type=['pdf','jpg'], accept_multiple_files=True, key=f"e_{st.session_state['uploader_key']}")
     
-    if st.button("🚀 SÜPER HIZLI BAŞLAT", type="primary"):
+    if st.button("🚀 Başlat", type="primary"):
         tum = []
         bar = st.progress(0)
         
@@ -325,7 +313,7 @@ with t1:
         if tum:
             st.session_state['analiz_sonuclari'] = tum
             sheete_kaydet(tum, secili)
-            st.success(f"✅ {len(tum)} kayıt fişek hızıyla işlendi!")
+            st.success(f"✅ {len(tum)} kayıt işlendi.")
 
     if 'analiz_sonuclari' in st.session_state:
         dt = st.session_state['analiz_sonuclari']
