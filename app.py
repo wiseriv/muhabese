@@ -23,7 +23,7 @@ def gemini_ile_analiz_et(image_bytes):
     """Fişi Gemini 1.5 Flash modeline gönderir ve JSON ister."""
     try:
         # Modeli seç (Flash modeli hızlı ve ucuzdur)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
         
         # Resmi formatla
         image_parts = [
@@ -111,3 +111,4 @@ if yuklenen_dosyalar:
             df.to_excel(writer, index=False)
             
         st.download_button("📥 Excel İndir", data=buffer.getvalue(), file_name="ai_muhasebe.xlsx", type="primary")
+
