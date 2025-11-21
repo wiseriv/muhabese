@@ -199,4 +199,9 @@ if dosyalar and st.button("🚀 Analiz ve Kategorize Et"):
             
         with col2:
             st.subheader("💼 Muhasebe Fişi")
-            df_muh = muhasebe_fisne_cevir(df
+            df_muh = muhasebe_fisne_cevir(df)
+            st.dataframe(df_muh, use_container_width=True)
+            
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer: df_muh.to_excel(writer, index=False)
+            st.download_button("📥 Fiş İndir", buf.getvalue(), "muhasebe_fis.xlsx", type="primary")
