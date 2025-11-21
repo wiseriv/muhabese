@@ -156,26 +156,14 @@ def sheetten_veri_cek(musteri):
     except: return pd.DataFrame()
 
 # --- 5. GEMINI & QR ---
-@st.cache_data
+# 🔥 MANUEL MODELLER: ARTIK GOOGLE'A SORMAK YOK, BİZ SÖYLÜYORUZ 🔥
 def modelleri_getir():
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-    try:
-        response = requests.get(url)
-        data = response.json()
-        tum_modeller = []
-        if 'models' in data:
-            for m in data['models']:
-                if 'generateContent' in m.get('supportedGenerationMethods', []):
-                    ad = m['name'].replace("models/", "")
-                    tum_modeller.append(ad)
-        
-        flash_2_5 = [m for m in tum_modeller if "2.5-flash" in m]
-        flash_2_0 = [m for m in tum_modeller if "2.0-flash" in m]
-        flash_1_5 = [m for m in tum_modeller if "1.5-flash" in m]
-        diger = [m for m in tum_modeller if m not in flash_2_5 and m not in flash_2_0 and m not in flash_1_5]
-        return flash_2_5 + flash_2_0 + flash_1_5 + diger
-    except: 
-        return ["gemini-1.5-flash"]
+    return [
+        "gemini-1.5-flash",      # En Kararlı ve Yüksek Kotalı
+        "gemini-1.5-pro",        # Daha Zeki
+        "gemini-2.5-flash",      # Yeni Hızlı
+        "gemini-2.0-flash-exp"   # Deneysel (Dikkat: Düşük Kota)
+    ]
 
 def qr_kodu_oku_ve_filtrele(image_bytes):
     try:
@@ -199,46 +187,54 @@ def dosyayi_hazirla(uploaded_file):
     img.save(buf, "JPEG", quality=80)
     return base64.b64encode(buf.getvalue()).decode('utf-8'), "image/jpeg"
 
-def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
-    try:
-        qr_data = None
-        if dosya_objesi.type != "application/pdf":
-            qr_data = qr_kodu_oku_ve_filtrele(dosya_objesi.getvalue())
-        
-        base64_data, mime_type = dosyayi_hazirla(dosya_objesi)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{secilen_model}:generateContent?key={API_KEY}"
-        headers = {'Content-Type': 'application/json'}
-        
-        qr_bilgisi = f"\n[İPUCU]: QR kod bulundu: '{qr_data}'" if qr_data else ""
+def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis", retries=3):
+    for attempt in range(retries):
+        try:
+            qr_data = None
+            if dosya_objesi.type != "application/pdf":
+                qr_data = qr_kodu_oku_ve_filtrele(dosya_objesi.getvalue())
+            
+            base64_data, mime_type = dosyayi_hazirla(dosya_objesi)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{secilen_model}:generateContent?key={API_KEY}"
+            headers = {'Content-Type': 'application/json'}
+            
+            qr_bilgisi = f"\n[İPUCU]: QR kod bulundu: '{qr_data}'" if qr_data else ""
 
-        if mod == "fis":
-            prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
-            JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
-            Tarih formatı Gün.Ay.Yıl olsun.
-            """
-        else:
-            prompt = """Kredi kartı ekstresi satırları. JSON Liste: [{"isyeri_adi": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0"}, ...]"""
+            if mod == "fis":
+                prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
+                DİKKAT: Firma adına aldanma, ürüne bak.
+                JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
+                Tarih formatı Gün.Ay.Yıl olsun.
+                """
+            else:
+                prompt = """Kredi kartı ekstresi satırları. JSON Liste: [{"isyeri_adi": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0"}, ...]"""
 
-        payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
-        response = requests.post(url, headers=headers, json=payload)
-        
-        # --- HATA AYIKLAMA (RÖNTGEN) ---
-        if response.status_code != 200:
-            return {"hata": f"Google Hatası ({response.status_code}): {response.text}"}
-        
-        metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
-        veri = json.loads(metin)
-        
-        if isinstance(veri, list):
-            for v in veri: v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"; v["qr_gecerli"] = False
-            return veri
-        else:
-            veri["dosya_adi"] = dosya_objesi.name
-            veri["qr_gecerli"] = True if qr_data else False
-            veri["_ham_dosya"] = dosya_objesi.getvalue()
-            veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
-            return veri
-    except Exception as e: return {"hata": str(e)}
+            payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
+            response = requests.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 429:
+                time.sleep(2 ** (attempt + 1))
+                continue 
+            
+            if response.status_code != 200: 
+                return {"hata": f"Google API Hatası ({response.status_code}): {response.text}"}
+            
+            metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
+            veri = json.loads(metin)
+            
+            if isinstance(veri, list):
+                for v in veri: v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"; v["qr_gecerli"] = False
+                return veri
+            else:
+                veri["dosya_adi"] = dosya_objesi.name
+                veri["qr_gecerli"] = True if qr_data else False
+                veri["_ham_dosya"] = dosya_objesi.getvalue()
+                veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
+                return veri
+                
+        except Exception as e: return {"hata": str(e)}
+    
+    return {"hata": "Kota limiti nedeniyle işlem yapılamadı."}
 
 def arsiv_olustur(veri_listesi):
     zip_buffer = io.BytesIO()
@@ -273,9 +269,11 @@ with st.sidebar:
             st.success("Silindi!"); time.sleep(1); st.rerun()
 
     st.divider()
-    modeller = modelleri_getir()
-    model = st.selectbox("AI Modeli", modeller, index=0)
-    hiz = st.slider("Paralel İşlem", 1, 20, 10) 
+    # MANUEL MODELLERİ KULLAN
+    model = st.selectbox("AI Modeli", modelleri_getir(), index=0)
+    
+    # HIZ SLIDER'I
+    hiz = st.slider("Paralel İşlem", 1, 20, 5) 
     
     if st.button("❌ Temizle"):
         st.session_state['uploader_key'] += 1
@@ -316,7 +314,7 @@ with t1:
         if tum:
             st.session_state['analiz_sonuclari'] = tum
             sheete_kaydet(tum, secili)
-            st.success(f"✅ {len(tum)} kayıt işlendi!")
+            st.success(f"✅ {len(tum)} kayıt başarıyla işlendi!")
         
         if hatalar:
             st.error("🚨 Bazı dosyalar işlenemedi:")
