@@ -12,10 +12,10 @@ from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import plotly.express as px
-import zipfile # Dosyaları paketlemek için yeni kütüphane
+import zipfile
 
 # --- 1. SAYFA AYARLARI ---
-st.set_page_config(page_title="Mihsap AI - Arşiv", layout="wide", page_icon="🗂️")
+st.set_page_config(page_title="Mihsap AI", layout="wide", page_icon="💼")
 
 # --- 2. GÜVENLİK ---
 def giris_kontrol():
@@ -33,7 +33,7 @@ giris_kontrol()
 API_KEY = st.secrets.get("GEMINI_API_KEY")
 if not API_KEY: st.error("API Key Eksik!"); st.stop()
 
-# --- 3. YARDIMCI MOTORLAR ---
+# --- 3. MOTORLAR ---
 def temizle_ve_sayiya_cevir(deger):
     if pd.isna(deger) or deger == "": return 0.0
     try:
@@ -131,73 +131,54 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model):
         headers = {'Content-Type': 'application/json'}
         prompt = """Bu belgeyi analiz et. JSON dön:
         {"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Ofis/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}
-        Tarih formatı mutlaka Gün.Ay.Yıl olsun (Örn: 23.11.2025)."""
+        Tarih formatı mutlaka Gün.Ay.Yıl olsun."""
         payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code != 200: return {"hata": "API Hatası"}
         metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
         veri = json.loads(metin)
         veri["dosya_adi"] = dosya_objesi.name
-        
-        # ZIP İÇİN HAM VERİYİ DE SAKLA
-        veri["_ham_dosya"] = dosya_objesi.getvalue() # Dosyanın içeriğini geçici olarak sakla
+        veri["_ham_dosya"] = dosya_objesi.getvalue()
         veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
-        
         return veri
     except Exception as e: return {"hata": str(e)}
 
-# --- 6. YENİ ÖZELLİK: AKILLI ARŞİV (ZIP) ---
 def arsiv_olustur(veri_listesi):
-    """Dosyaları yeniden adlandırıp ZIP yapar."""
     zip_buffer = io.BytesIO()
-    
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for veri in veri_listesi:
             if "_ham_dosya" in veri:
-                # Yeni Dosya Adı Oluştur: TARİH_YER_TUTAR
                 try:
                     tarih_str = veri.get("tarih", "00.00.0000").replace("/", ".").replace("-", ".")
-                    # Tarihi YYYY-MM-DD formatına çevirmeye çalış (Sıralama düzgün olsun diye)
-                    try:
-                        tarih_obj = datetime.strptime(tarih_str, "%d.%m.%Y")
-                        tarih_clean = tarih_obj.strftime("%Y-%m-%d")
-                    except:
-                        tarih_clean = "Tarihsiz"
-
-                    yer = veri.get("isyeri_adi", "Firma").replace(" ", "_").upper()[:15] # Çok uzun isimleri kısalt
-                    # Geçersiz karakterleri temizle
+                    yer = veri.get("isyeri_adi", "Firma").replace(" ", "_").upper()[:15]
                     yer = "".join([c for c in yer if c.isalnum() or c in ('_','-')])
-                    
                     tutar = str(veri.get("toplam_tutar", "0")).replace(".", ",")
                     uzanti = veri.get("_dosya_turu", "jpg")
-                    
-                    yeni_ad = f"{tarih_clean}_{yer}_{tutar}TL.{uzanti}"
-                    
-                    # ZIP'e ekle
+                    yeni_ad = f"{tarih_str}_{yer}_{tutar}TL.{uzanti}"
                     zip_file.writestr(yeni_ad, veri["_ham_dosya"])
-                    
-                except Exception as e:
-                    # Hata olursa orijinal isimle ekle
+                except:
                     zip_file.writestr(f"HATA_{veri.get('dosya_adi')}", veri["_ham_dosya"])
-
     return zip_buffer.getvalue()
 
-# --- 7. ARAYÜZ ---
+# --- 6. ARAYÜZ (PERSISTENT STATE İLE) ---
 with st.sidebar:
-    st.markdown("### 🗂️ Mihsap Arşiv")
+    st.markdown("### 💼 Mihsap AI Pro")
     modeller = modelleri_getir()
     secilen_model = st.selectbox("Model", modeller) if modeller else "gemini-1.5-flash"
     hiz = st.slider("Hız", 1, 5, 3)
+    if st.button("❌ Ekranı Temizle"):
+        if 'analiz_sonuclari' in st.session_state:
+            del st.session_state['analiz_sonuclari']
+        st.rerun()
 
-tab1, tab2 = st.tabs(["📤 Akıllı Arşiv & İşlem", "📊 Raporlar"])
+tab1, tab2 = st.tabs(["📤 Evrak Yükle", "📊 Raporlar"])
 
 with tab1:
-    st.header("Evrak Yükle & Düzenle")
-    st.info("Yüklediğiniz dosyaların isimleri 'Tarih_Firma_Tutar' formatında otomatik düzeltilip size verilecektir.")
+    st.header("Evrak İşleme")
+    dosyalar = st.file_uploader("Dosyaları Bırakın", type=['jpg', 'png', 'jpeg', 'pdf'], accept_multiple_files=True)
     
-    dosyalar = st.file_uploader("Dosyaları Bırakın (Karmaşık isimli olabilir)", type=['jpg', 'png', 'jpeg', 'pdf'], accept_multiple_files=True)
-    
-    if dosyalar and st.button("🚀 Başlat ve Düzenle", type="primary"):
+    # --- BUTON LOGİĞİ (DEĞİŞTİ) ---
+    if dosyalar and st.button("🚀 İşlemi Başlat", type="primary"):
         tum_veriler = []
         bar = st.progress(0)
         
@@ -211,43 +192,43 @@ with tab1:
                 bar.progress(completed / len(dosyalar))
                 time.sleep(0.5)
         
+        # VERİYİ HAFIZAYA (SESSION STATE) KAYDET
         if tum_veriler:
-            df = pd.DataFrame(tum_veriler)
-            # Excel için ham veriyi (byte) tablodan çıkaralım, Excel şişmesin
-            df_gosterim = df.drop(columns=["_ham_dosya", "_dosya_turu"], errors='ignore')
-            
-            st.success("✅ İşlem Tamamlandı.")
+            st.session_state['analiz_sonuclari'] = tum_veriler
             sheete_kaydet(tum_veriler)
+            st.success(f"{len(tum_veriler)} evrak başarıyla işlendi ve veritabanına yazıldı.")
+        else:
+            st.error("Hiçbir veri işlenemedi.")
+
+    # --- SONUÇ GÖSTERİMİ (HAFIZADAN OKUR) ---
+    # Butona basılmasa bile, hafızada veri varsa gösterir
+    if 'analiz_sonuclari' in st.session_state and st.session_state['analiz_sonuclari']:
+        veriler = st.session_state['analiz_sonuclari']
+        df = pd.DataFrame(veriler)
+        df_gosterim = df.drop(columns=["_ham_dosya", "_dosya_turu"], errors='ignore')
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### 📂 Arşiv (ZIP)")
+            st.info("Dosyalar otomatik isimlendirildi.")
+            zip_data = arsiv_olustur(veriler)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### 📂 Düzenlenmiş Dosyalar (ZIP)")
-                st.markdown("`IMG_4821.jpg` gibi anlamsız isimler yerine:")
-                st.code("2025-11-22_MIGROS_450,50TL.jpg\n2025-11-22_SHELL_1200,00TL.pdf")
-                
-                # ZIP İndirme Butonu
-                zip_data = arsiv_olustur(tum_veriler)
-                st.download_button(
-                    label="📦 Düzenlenmiş Arşivi İndir (ZIP)",
-                    data=zip_data,
-                    file_name="duzenlenmis_evraklar_arsivi.zip",
-                    mime="application/zip",
-                    type="primary"
-                )
+            # İŞTE SİHİR BURADA: Butona bassan da bu blok 'if' içinde olduğu için kaybolmaz
+            st.download_button("📦 Arşivi İndir (ZIP)", zip_data, "arsiv.zip", "application/zip", type="primary")
 
-            with col2:
-                st.markdown("### 📊 Excel Raporları")
-                df_muh = muhasebe_fisne_cevir(df_gosterim)
-                
-                buf1 = io.BytesIO()
-                with pd.ExcelWriter(buf1, engine='openpyxl') as writer: df_gosterim.to_excel(writer, index=False)
-                st.download_button("📥 Liste Excel", buf1.getvalue(), "liste.xlsx")
-                
-                buf2 = io.BytesIO()
-                with pd.ExcelWriter(buf2, engine='openpyxl') as writer: df_muh.to_excel(writer, index=False)
-                st.download_button("📥 Muhasebe Fişi", buf2.getvalue(), "muhasebe.xlsx")
+        with col2:
+            st.markdown("### 📊 Excel Raporları")
+            df_muh = muhasebe_fisne_cevir(df_gosterim)
+            
+            buf1 = io.BytesIO()
+            with pd.ExcelWriter(buf1, engine='openpyxl') as writer: df_gosterim.to_excel(writer, index=False)
+            st.download_button("📥 Liste İndir", buf1.getvalue(), "liste.xlsx")
+            
+            buf2 = io.BytesIO()
+            with pd.ExcelWriter(buf2, engine='openpyxl') as writer: df_muh.to_excel(writer, index=False)
+            st.download_button("📥 Muhasebe Fişi", buf2.getvalue(), "muhasebe.xlsx")
 
-            st.dataframe(df_gosterim, use_container_width=True)
+        st.dataframe(df_gosterim, use_container_width=True)
 
 with tab2:
     st.header("Yönetim Paneli")
