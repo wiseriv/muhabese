@@ -134,7 +134,12 @@ def sheete_kaydet(veri, musteri):
         rows = []
         for v in veri:
             durum = "✅" if float(str(v.get('toplam_tutar',0)).replace(',','.')) > 0 else "⚠️"
-            qr_durumu = "📱QR" if v.get("qr_gecerli") else "-"
+            
+            # QR DURUMU GÜNCELLEMESİ
+            # Artık hem Python'un hem Gemini'nin bulduğu QR'a bakıyoruz
+            qr_var_mi = v.get("qr_gecerli") or (v.get("qr_icerigi") and len(v.get("qr_icerigi")) > 5)
+            qr_durumu = "📱QR" if qr_var_mi else "-"
+            
             rows.append([v.get("dosya_adi"), v.get("isyeri_adi"), v.get("fiş_no"), v.get("tarih"), v.get("kategori", "Diğer"), str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum, qr_durumu])
         ws.append_rows(rows)
         return True
@@ -173,7 +178,8 @@ def qr_kodu_oku_ve_filtrele(image_bytes):
         decoded_objects = decode(img)
         for obj in decoded_objects:
             raw_data = obj.data.decode("utf-8")
-            if "http" in raw_data or "vkno" in raw_data.lower() or len(raw_data) > 50: return raw_data 
+            # Filtreyi biraz gevşettik
+            if len(raw_data) > 10: return raw_data 
             else: continue
         return None
     except: return None
@@ -190,21 +196,27 @@ def dosyayi_hazirla(uploaded_file):
 
 def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
     try:
-        qr_data = None
+        qr_data_python = None
+        # Python sadece resimlerde QR arar
         if dosya_objesi.type != "application/pdf":
-            qr_data = qr_kodu_oku_ve_filtrele(dosya_objesi.getvalue())
+            qr_data_python = qr_kodu_oku_ve_filtrele(dosya_objesi.getvalue())
         
         base64_data, mime_type = dosyayi_hazirla(dosya_objesi)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{secilen_model}:generateContent?key={API_KEY}"
         headers = {'Content-Type': 'application/json'}
         
-        qr_bilgisi = f"\n[İPUCU]: QR kod bulundu: '{qr_data}'" if qr_data else ""
+        qr_bilgisi = f"\n[İPUCU]: Python QR kodu buldu: '{qr_data_python}'" if qr_data_python else ""
 
         if mod == "fis":
+            # --- PROMPT GÜNCELLENDİ: GEMINI'YE "SEN DE QR ARA" DEDİK ---
             prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
-            DİKKAT: Firma adına aldanma, ürüne bak. Ofel Turizm -> Kitap -> Kırtasiye olabilir.
-            JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
-            Tarih formatı Gün.Ay.Yıl olsun.
+            
+            GÖREVLER:
+            1. Belgede veya kenarlarda QR Kod var mı? Varsa içindeki metni oku ve 'qr_icerigi' alanına yaz. (Özellikle PDF ise sen okumalısın).
+            2. Kategori: Firma adına aldanma, ürüne bak (Örn: Ofel Turizm -> Kitap -> Kırtasiye).
+            
+            JSON Formatı:
+            {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0.00", "qr_icerigi": "..."}}
             """
         else:
             prompt = """Kredi kartı ekstresi satırları. JSON Liste: [{"isyeri_adi": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0"}, ...]"""
@@ -223,7 +235,17 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
             return veri
         else:
             veri["dosya_adi"] = dosya_objesi.name
-            veri["qr_gecerli"] = True if qr_data else False
+            
+            # --- KRİTİK KONTROL: QR VAR MI? ---
+            # 1. Python buldu mu? VEYA 2. Gemini buldu mu?
+            gemini_qr = veri.get("qr_icerigi", "")
+            if qr_data_python:
+                veri["qr_gecerli"] = True
+            elif gemini_qr and len(str(gemini_qr)) > 5: # Gemini bir şey bulmuşsa
+                veri["qr_gecerli"] = True
+            else:
+                veri["qr_gecerli"] = False
+                
             veri["_ham_dosya"] = dosya_objesi.getvalue()
             veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
             return veri
@@ -265,7 +287,6 @@ with st.sidebar:
     modeller = modelleri_getir()
     model = st.selectbox("AI Modeli", modeller) if modeller else "gemini-1.5-flash"
     hiz = st.slider("Hız", 1, 5, 3)
-    
     if st.button("❌ Temizle"):
         st.session_state['uploader_key'] += 1
         if 'analiz_sonuclari' in st.session_state: del st.session_state['analiz_sonuclari']
@@ -301,17 +322,13 @@ with t1:
             sheete_kaydet(tum, secili)
             st.success(f"✅ {len(tum)} kayıt işlendi.")
 
-    # --- SONUÇLARI GÖSTER (KALICI) ---
     if 'analiz_sonuclari' in st.session_state:
         dt = st.session_state['analiz_sonuclari']
         df = pd.DataFrame(dt)
-        # Ham veriyi gösterme, tabloyu şişirmesin
-        st.dataframe(df.drop(columns=["_ham_dosya", "_dosya_turu", "qr_data"], errors='ignore'), use_container_width=True)
+        st.dataframe(df.drop(columns=["_ham_dosya", "_dosya_turu", "qr_data", "qr_icerigi"], errors='ignore'), use_container_width=True)
         
         col1, col2 = st.columns(2)
-        with col1:
-            zip_data = arsiv_olustur(dt)
-            st.download_button("📦 ZIP Arşiv", zip_data, f"{secili}_arsiv.zip", "application/zip", type="primary")
+        with col1: st.download_button("📦 ZIP Arşiv", arsiv_olustur(dt), f"{secili}_arsiv.zip", "application/zip")
         with col2:
             df_m = muhasebe_fisne_cevir(df)
             buf = io.BytesIO()
@@ -334,7 +351,12 @@ with t3:
     with c1:
         hk["Gıda"] = st.text_input("Gıda", hk["Gıda"])
         hk["Ulaşım"] = st.text_input("Ulaşım", hk["Ulaşım"])
-    with c2:
+        hk["Kırtasiye"] = st.text_input("Kırtasiye", hk["Kırtasiye"])
         hk["KDV"] = st.text_input("KDV", hk["KDV"])
+    with c2:
+        hk["Teknoloji"] = st.text_input("Teknoloji", hk["Teknoloji"])
+        hk["Konaklama"] = st.text_input("Konaklama", hk["Konaklama"])
+        hk["Diğer"] = st.text_input("Diğer", hk["Diğer"])
         hk["Kasa"] = st.text_input("Kasa", hk["Kasa"])
+        hk["Banka"] = st.text_input("Banka", hk["Banka"])
     if st.button("Kaydet"): st.success("Kaydedildi!")
