@@ -16,16 +16,14 @@ except Exception as e:
     st.error(f"API Anahtarı Hatası: {e}")
 
 def gemini_ile_analiz_et(image_bytes, model_adi):
-    """Seçilen model ile analiz yapar."""
     try:
-        # Modeli yükle
         model = genai.GenerativeModel(model_adi)
         
         image_parts = [{"mime_type": "image/jpeg", "data": image_bytes}]
 
         prompt = """
-        Bu fiş görüntüsünü analiz et.
-        Aşağıdaki formatta saf JSON verisi çıkar (Markdown kullanma):
+        Bu fiş görüntüsünü analiz et. 
+        Cevabı SADECE aşağıdaki formatta JSON olarak ver:
         {
             "isyeri_adi": "İşyeri Adı",
             "tarih": "GG.AA.YYYY",
@@ -33,49 +31,39 @@ def gemini_ile_analiz_et(image_bytes, model_adi):
             "toplam_kdv": "00.00"
         }
         """
-
+        
+        # Gemini Pro Vision (Eski sürüm) config ayarı gerekebilir
         response = model.generate_content([prompt, image_parts[0]])
         
         text = response.text.strip()
-        # Markdown temizliği
         if text.startswith("```json"): text = text[7:-3]
         if text.startswith("```"): text = text[3:-3]
         
         return json.loads(text)
 
     except Exception as e:
-        st.error(f"Model ({model_adi}) bu isteği yapamadı. Hata: {e}")
+        st.error(f"Model ({model_adi}) Hatası: {e}")
         return None
 
-# --- WEB ARAYÜZÜ ---
-st.set_page_config(page_title="Mihsap AI - Final", layout="wide", page_icon="🧠")
+# --- ARAYÜZ ---
+st.set_page_config(page_title="Mihsap AI - Kararlı Sürüm", layout="wide", page_icon="🛡️")
 
-# --- SOL MENÜ (AYARLAR) ---
 with st.sidebar:
-    st.header("🛠️ Motor Ayarları")
-    
-    # Modelleri biz elle yazıyoruz, Google'a sormuyoruz
-    secenekler = [
-        "models/gemini-1.5-flash",      # En hızlı ve ucuz
-        "models/gemini-1.5-pro",        # En zeki
-        "models/gemini-pro-vision",     # Eski ama sağlam
-        "Manuel Giriş Yap"              # Listede olmayan bir şey denemek için
+    st.header("⚙️ Model Seçimi")
+    # BURASI ÖNEMLİ: En garanti çalışan modelleri en başa koyduk
+    model_listesi = [
+        "gemini-pro-vision",  # EN GARANTİ ÇALIŞAN (Resim okuma yeteneği olan eski sürüm)
+        "gemini-1.5-flash",   # Yeni sürüm (Kütüphane güncellenirse çalışır)
+        "gemini-1.5-pro",     # Yeni güçlü sürüm
+        "gemini-pro"          # Sadece metin (Bazen resim yemez ama listede dursun)
     ]
-    
-    secim = st.selectbox("Kullanılacak Yapay Zeka Modeli", secenekler)
-    
-    final_model_adi = secim
-    if secim == "Manuel Giriş Yap":
-        final_model_adi = st.text_input("Model Adını Yaz", "models/gemini-1.5-flash-latest")
-    
-    st.info(f"Şu an seçili: {final_model_adi}")
-    st.warning("Not: Eğer hata alırsan listeden diğer modelleri dene.")
+    secilen_model = st.selectbox("Model Seç", model_listesi)
+    st.info(f"Seçili: {secilen_model}")
 
-# --- ANA EKRAN ---
-st.title("🧠 Mihsap AI (Zeka Modu)")
-st.write("Fişinizi yükleyin, Gemini 1.5 Flash analiz etsin.")
+st.title("🛡️ Mihsap AI (Kararlı Mod)")
+st.write("Fişinizi yükleyin. Önerilen Model: **gemini-pro-vision**")
 
-yuklenen_dosyalar = st.file_uploader("Fişleri Yükle", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
+yuklenen_dosyalar = st.file_uploader("Fiş Yükle", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
 
 if yuklenen_dosyalar:
     tum_veriler = []
@@ -83,11 +71,10 @@ if yuklenen_dosyalar:
     
     for i, dosya in enumerate(yuklenen_dosyalar):
         image = Image.open(dosya)
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='JPEG')
+        buf = io.BytesIO()
+        image.save(buf, format='JPEG')
         
-        # Seçilen model ile analiz et
-        sonuc = gemini_ile_analiz_et(img_byte_arr.getvalue(), final_model_adi)
+        sonuc = gemini_ile_analiz_et(buf.getvalue(), secilen_model)
         
         if sonuc:
             sonuc["dosya_adi"] = dosya.name
@@ -97,16 +84,10 @@ if yuklenen_dosyalar:
     
     if tum_veriler:
         df = pd.DataFrame(tum_veriler)
-        
-        # Sütun sırası
         cols = ["dosya_adi", "isyeri_adi", "tarih", "toplam_tutar", "toplam_kdv"]
-        mevcut = [c for c in cols if c in df.columns]
-        
-        st.write("### 📊 Sonuçlar")
-        st.dataframe(df[mevcut], use_container_width=True)
+        st.dataframe(df[[c for c in cols if c in df.columns]], use_container_width=True)
         
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
-            
-        st.download_button("📥 Excel İndir", data=buffer.getvalue(), file_name="ai_muhasebe_final.xlsx", type="primary")
+        st.download_button("📥 Excel İndir", data=buffer.getvalue(), file_name="muhasebe.xlsx")
