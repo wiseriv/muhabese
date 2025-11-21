@@ -13,30 +13,45 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import plotly.express as px
 import zipfile
+from pyzbar.pyzbar import decode
+import cv2
+import numpy as np
 
-# --- 1. AYARLAR VE GÜVENLİK ---
+# --- 1. SAYFA AYARLARI ---
 st.set_page_config(page_title="Mihsap AI", layout="wide", page_icon="🏢")
 
+# --- 2. GÜVENLİK ---
 def giris_kontrol():
-    if 'giris_yapildi' not in st.session_state: st.session_state['giris_yapildi'] = False
+    if 'giris_yapildi' not in st.session_state:
+        st.session_state['giris_yapildi'] = False
+
     if not st.session_state['giris_yapildi']:
-        c1, c2, c3 = st.columns([1,2,1])
+        c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
             st.markdown("## 🔐 Mihsap AI | Giriş")
-            with st.form("login"):
-                sifre = st.text_input("Şifre", type="password")
-                if st.form_submit_button("Giriş"):
+            with st.form("giris_formu"):
+                sifre = st.text_input("Yönetici Şifresi", type="password")
+                submit_btn = st.form_submit_button("Giriş Yap")
+                
+                if submit_btn:
                     if sifre == "12345":
                         st.session_state['giris_yapildi'] = True
                         st.rerun()
-                    else: st.error("Hatalı Şifre")
+                    else:
+                        st.error("❌ Hatalı Şifre!")
         st.stop()
+
 giris_kontrol()
 
 API_KEY = st.secrets.get("GEMINI_API_KEY")
-if not API_KEY: st.error("API Key Eksik!"); st.stop()
+if not API_KEY:
+    st.error("🚨 HATA: Secrets ayarlarında GEMINI_API_KEY bulunamadı.")
+    st.stop()
 
-# --- 2. HESAP PLANI AYARLARI ---
+# --- 3. AYARLAR VE SIFIRLAYICILAR ---
+if 'uploader_key' not in st.session_state:
+    st.session_state['uploader_key'] = 0
+
 if 'hesap_kodlari' not in st.session_state:
     st.session_state['hesap_kodlari'] = {
         "Gıda": "770.01", "Ulaşım": "770.02", "Kırtasiye": "770.03", 
@@ -44,7 +59,7 @@ if 'hesap_kodlari' not in st.session_state:
         "KDV": "191.18", "Kasa": "100.01", "Banka": "102.01"
     }
 
-# --- 3. MOTORLAR ---
+# --- 4. YARDIMCI MOTORLAR ---
 def temizle_ve_sayiya_cevir(deger):
     if pd.isna(deger) or deger == "": return 0.0
     try:
@@ -64,17 +79,19 @@ def muhasebe_fisne_cevir(df_ham):
             matrah = toplam - kdv
             tarih = str(row.get('tarih', datetime.now().strftime('%d.%m.%Y')))
             kategori = row.get('kategori', 'Diğer')
+            
             gider_kodu = hk.get(kategori, hk["Diğer"])
             aciklama = f"{kategori} - {row.get('isyeri_adi', 'Evrak')}"
             
             if matrah > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": gider_kodu, "Açıklama": aciklama, "Borç": matrah, "Alacak": 0})
             if kdv > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": hk["KDV"], "Açıklama": "KDV", "Borç": kdv, "Alacak": 0})
+            
             alacak_hesabi = hk["Banka"] if "Ekstre" in str(row.get('dosya_adi','')) else hk["Kasa"]
             yevmiye.append({"Tarih": tarih, "Hesap Kodu": alacak_hesabi, "Açıklama": "Ödeme", "Borç": 0, "Alacak": toplam})
         except: continue
     return pd.DataFrame(yevmiye)
 
-# --- 4. GOOGLE SHEETS BAĞLANTISI ---
+# --- 5. GOOGLE SHEETS BAĞLANTISI ---
 @st.cache_resource
 def sheets_baglantisi_kur():
     if "gcp_service_account" not in st.secrets: return None
@@ -94,9 +111,7 @@ def musteri_listesini_getir():
             ws = sheet.add_worksheet(title="Musteriler", rows=100, cols=2)
             ws.append_row(["Müşteri Adı", "Tarih"])
             ws.append_row(["Varsayılan Müşteri", str(datetime.now())])
-        
-        musteriler = ws.col_values(1)[1:]
-        return musteriler if musteriler else ["Varsayılan Müşteri"]
+        return ws.col_values(1)[1:] or ["Varsayılan Müşteri"]
     except: return ["Varsayılan Müşteri"]
 
 def yeni_musteri_ekle(musteri_adi):
@@ -109,29 +124,23 @@ def yeni_musteri_ekle(musteri_adi):
         ws_main.append_row([musteri_adi, str(datetime.now())])
         try:
             new_ws = sheet.add_worksheet(title=musteri_adi, rows=1000, cols=10)
-            new_ws.append_row(["Dosya Adı", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum"])
+            new_ws.append_row(["Dosya Adı", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR Bilgisi"])
         except: pass
         return True
     except Exception as e: return str(e)
 
-# --- YENİ: MÜŞTERİ SİLME FONKSİYONU ---
 def musteri_sil(musteri_adi):
     client = sheets_baglantisi_kur()
     if not client: return False
     try:
         sheet = client.open("Mihsap Veritabanı")
-        
-        # 1. Listeden Sil
         ws_main = sheet.worksheet("Musteriler")
         cell = ws_main.find(musteri_adi)
         if cell: ws_main.delete_rows(cell.row)
-        
-        # 2. Sekmeyi (Worksheet) Sil
         try:
             ws_cust = sheet.worksheet(musteri_adi)
             sheet.del_worksheet(ws_cust)
-        except: pass # Sekme zaten yoksa sorun yok
-        
+        except: pass
         return True
     except Exception as e: return str(e)
 
@@ -146,7 +155,15 @@ def sheete_kaydet(veri_listesi, musteri_adi):
         rows = []
         for v in veri_listesi:
             durum = "✅" if float(str(v.get('toplam_tutar',0)).replace(',','.')) > 0 else "⚠️"
-            rows.append([v.get("dosya_adi"), v.get("isyeri_adi"), v.get("fiş_no"), v.get("tarih"), v.get("kategori", "Diğer"), str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum])
+            # QR verisi varsa duruma ekle
+            qr_notu = "📱QR Okundu" if v.get("qr_bulundu") else "-"
+            
+            rows.append([
+                v.get("dosya_adi"), v.get("isyeri_adi"), v.get("fiş_no"), 
+                v.get("tarih"), v.get("kategori", "Diğer"), 
+                str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), 
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum, qr_notu
+            ])
         ws.append_rows(rows)
         return True
     except: return False
@@ -166,7 +183,7 @@ def sheetten_veri_cek(musteri_adi):
         return df
     except: return pd.DataFrame()
 
-# --- 5. GEMINI ---
+# --- 6. GEMINI & QR MOTORU ---
 @st.cache_data
 def modelleri_getir():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
@@ -176,6 +193,17 @@ def modelleri_getir():
         flash = [m['name'].replace("models/", "") for m in data.get('models', []) if "flash" in m['name']]
         return flash + [m['name'].replace("models/", "") for m in data.get('models', []) if "flash" not in m['name']]
     except: return []
+
+def qr_kodu_oku(image_bytes):
+    """Resimdeki QR kodunu okur."""
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        decoded_objects = decode(img)
+        for obj in decoded_objects:
+            return obj.data.decode("utf-8") # İlk bulunan QR'ı döndür
+        return None
+    except: return None
 
 def dosyayi_hazirla(uploaded_file):
     bytes_data = uploaded_file.getvalue()
@@ -189,13 +217,23 @@ def dosyayi_hazirla(uploaded_file):
 
 def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
     try:
+        # 1. ADIM: QR KOD KONTROLÜ (Sadece resimlerde)
+        qr_data = None
+        if dosya_objesi.type != "application/pdf":
+            qr_data = qr_kodu_oku(dosya_objesi.getvalue())
+        
+        # 2. ADIM: YAPAY ZEKA ANALİZİ
         base64_data, mime_type = dosyayi_hazirla(dosya_objesi)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{secilen_model}:generateContent?key={API_KEY}"
         headers = {'Content-Type': 'application/json'}
         
+        qr_prompt_ek = ""
+        if qr_data:
+            qr_prompt_ek = f"\nÖNEMLİ İPUCU: Belgede bir QR kod okundu. İçeriği şu: '{qr_data}'. Lütfen bu veriyi kullanarak Tutar ve Tarih bilgilerini kesinleştir."
+
         if mod == "fis":
-            prompt = """Bu belgeyi analiz et. JSON dön:
-            {"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Ulaşım/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}
+            prompt = f"""Bu belgeyi analiz et. {qr_prompt_ek}
+            JSON dön: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Ulaşım/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
             Tarih formatı Gün.Ay.Yıl olsun."""
         else:
             prompt = """Kredi kartı ekstresi. Satırları listele. JSON Liste dön:
@@ -208,12 +246,21 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis"):
         metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
         veri = json.loads(metin)
         
+        # QR bilgisini veriye ekleyelim (Liste veya Sözlük dönüşüne göre)
         if isinstance(veri, list):
-            for v in veri: v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"
+            for v in veri: 
+                v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"
+                v["qr_bulundu"] = False
             return veri
         else:
             veri["dosya_adi"] = dosya_objesi.name
+            veri["qr_bulundu"] = True if qr_data else False
+            veri["qr_data"] = qr_data if qr_data else ""
+            # Dosya içeriğini sakla (ZIP için)
+            veri["_ham_dosya"] = dosya_objesi.getvalue()
+            veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
             return veri
+            
     except Exception as e: return {"hata": str(e)}
 
 def arsiv_olustur(veri_listesi):
@@ -222,24 +269,24 @@ def arsiv_olustur(veri_listesi):
         for veri in veri_listesi:
             if "_ham_dosya" in veri:
                 try:
-                    tarih = veri.get("tarih", "00.00.0000").replace("/", ".")
+                    tarih_str = veri.get("tarih", "00.00.0000").replace("/", ".").replace("-", ".")
                     yer = "".join([c for c in veri.get("isyeri_adi","").upper() if c.isalnum()])[:10]
                     tutar = str(veri.get("toplam_tutar", "0")).replace(".", ",")
-                    ad = f"{tarih}_{yer}_{tutar}TL.{veri.get('_dosya_turu','jpg')}"
-                    zip_file.writestr(ad, veri["_ham_dosya"])
-                except: zip_file.writestr(f"HATA_{veri.get('dosya_adi')}", veri["_ham_dosya"])
+                    uzanti = veri.get("_dosya_turu", "jpg")
+                    yeni_ad = f"{tarih_str}_{yer}_{tutar}TL.{uzanti}"
+                    zip_file.writestr(yeni_ad, veri["_ham_dosya"])
+                except:
+                    zip_file.writestr(f"HATA_{veri.get('dosya_adi')}", veri["_ham_dosya"])
     return zip_buffer.getvalue()
 
-# --- 6. ARAYÜZ ---
+# --- 7. ARAYÜZ ---
 with st.sidebar:
     st.title("🏢 Mihsap Enterprise")
     
-    # --- MÜŞTERİ YÖNETİMİ ---
     st.markdown("### 👥 Müşteri Paneli")
     musteri_listesi = musteri_listesini_getir()
     secili_musteri = st.selectbox("Aktif Müşteri", musteri_listesi)
     
-    # EKLEME
     with st.expander("➕ Müşteri Ekle"):
         yeni_ad = st.text_input("Firma Adı")
         if st.button("Ekle"):
@@ -247,33 +294,23 @@ with st.sidebar:
                 sonuc = yeni_musteri_ekle(yeni_ad)
                 if sonuc == True:
                     st.success("Eklendi! Yenileniyor...")
-                    time.sleep(1)
-                    st.rerun()
+                    time.sleep(1); st.rerun()
                 else: st.error(f"Hata: {sonuc}")
 
-    # SİLME (YENİ ÖZELLİK)
     with st.expander("➖ Müşteri Sil", expanded=False):
         silinecek = st.selectbox("Silinecek Müşteri", [m for m in musteri_listesi if m != "Varsayılan Müşteri"])
-        st.warning(f"Dikkat: '{silinecek}' veritabanından ve tüm kayıtlarından silinecek!")
         if st.button("🗑️ Sil ve Onayla"):
             res = musteri_sil(silinecek)
             if res == True:
-                st.success("Müşteri silindi! Sayfa yenileniyor...")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error(f"Silinemedi: {res}")
+                st.success("Silindi! Yenileniyor..."); time.sleep(1); st.rerun()
+            else: st.error(f"Silinemedi: {res}")
 
-    st.divider()
-    st.info(f"İşlem: **{secili_musteri}**")
-    
-    # AYARLAR
     st.divider()
     modeller = modelleri_getir()
     model = st.selectbox("AI Modeli", modeller) if modeller else "gemini-1.5-flash"
     hiz = st.slider("Hız", 1, 5, 3)
     
-    if st.button("❌ Temizle"):
+    if st.button("❌ Ekranı Temizle"):
         st.session_state['uploader_key'] = st.session_state.get('uploader_key', 0) + 1
         if 'analiz_sonuclari' in st.session_state: del st.session_state['analiz_sonuclari']
         st.rerun()
@@ -293,18 +330,14 @@ with t1:
         tum_veriler = []
         bar = st.progress(0)
         
-        # Fişler
         if dosyalar:
             with concurrent.futures.ThreadPoolExecutor(max_workers=hiz) as executor:
                 future_to_file = {executor.submit(gemini_ile_analiz_et, d, model, "fis"): d for d in dosyalar}
                 for future in concurrent.futures.as_completed(future_to_file):
                     res = future.result()
-                    if "hata" not in res: 
-                        res["_ham_dosya"] = future_to_file[future].getvalue()
-                        res["_dosya_turu"] = future_to_file[future].type.split('/')[-1]
-                        tum_veriler.append(res)
+                    if "hata" not in res: tum_veriler.append(res)
+                    bar.progress(100)
         
-        # Ekstreler
         if ekstreler:
             with st.spinner("Ekstre okunuyor..."):
                 for d in ekstreler:
@@ -315,13 +348,11 @@ with t1:
             st.session_state['analiz_sonuclari'] = tum_veriler
             sheete_kaydet(tum_veriler, secili_musteri)
             st.success(f"✅ {len(tum_veriler)} işlem '{secili_musteri}' hesabına kaydedildi!")
-        
-        bar.progress(100)
 
     if 'analiz_sonuclari' in st.session_state:
         data = st.session_state['analiz_sonuclari']
         df = pd.DataFrame(data)
-        df_show = df.drop(columns=["_ham_dosya", "_dosya_turu"], errors='ignore')
+        df_show = df.drop(columns=["_ham_dosya", "_dosya_turu", "qr_data"], errors='ignore')
         
         st.dataframe(df_show, use_container_width=True)
         
@@ -352,7 +383,6 @@ with t3:
     st.header("⚙️ Hesap Planı Ayarları")
     col1, col2 = st.columns(2)
     yeni_kodlar = st.session_state['hesap_kodlari'].copy()
-    
     with col1:
         yeni_kodlar["Gıda"] = st.text_input("Gıda Kodu", yeni_kodlar["Gıda"])
         yeni_kodlar["Ulaşım"] = st.text_input("Ulaşım", yeni_kodlar["Ulaşım"])
@@ -364,7 +394,6 @@ with t3:
         yeni_kodlar["Diğer"] = st.text_input("Diğer", yeni_kodlar["Diğer"])
         yeni_kodlar["Kasa"] = st.text_input("Kasa (100)", yeni_kodlar["Kasa"])
         yeni_kodlar["Banka"] = st.text_input("Banka (102)", yeni_kodlar["Banka"])
-
     if st.button("💾 Ayarları Kaydet"):
         st.session_state['hesap_kodlari'] = yeni_kodlar
-        st.success("Ayarlar güncellendi!")
+        st.success("Ayarlar kaydedildi!")
