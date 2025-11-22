@@ -48,7 +48,16 @@ if 'hesap_kodlari' not in st.session_state:
         "KDV": "191.18", "Kasa": "100.01", "Banka": "102.01"
     }
 
-# --- 3. MOTORLAR ---
+# --- 3. MOTORLAR (TÜRKÇE KARAKTER FIX) ---
+def tr_temizle(text):
+    """Türkçe karakterleri İngilizce karşılıklarına çevirir."""
+    tr_map = {"ı": "i", "ğ": "g", "ü": "u", "ş": "s", "ö": "o", "ç": "c",
+              "İ": "i", "Ğ": "g", "Ü": "u", "Ş": "s", "Ö": "o", "Ç": "c"}
+    text = str(text)
+    for tr_char, eng_char in tr_map.items():
+        text = text.replace(tr_char, eng_char)
+    return text.lower().strip().replace(" ", "").replace("_", "")
+
 def temizle_ve_sayiya_cevir(deger):
     if pd.isna(deger) or deger == "": return 0.0
     try:
@@ -58,28 +67,18 @@ def temizle_ve_sayiya_cevir(deger):
         return float(s)
     except: return 0.0
 
-def yeni_dosya_adi_olustur(veri):
-    """Excel ve ZIP için ortak, temiz bir dosya adı üretir."""
-    try:
-        tarih = str(veri.get("tarih", "00.00.0000")).replace("/", ".").replace("-", ".")
-        yer = "".join([c for c in str(veri.get("isyeri_adi","Firma")).upper() if c.isalnum()])[:15]
-        tutar = str(veri.get("toplam_tutar", "0")).replace(".", ",")
-        uzanti = veri.get("_dosya_turu", "jpg")
-        return f"{tarih}_{yer}_{tutar}TL.{uzanti}"
-    except:
-        return f"HATA_{veri.get('dosya_adi', 'bilinmeyen')}"
-
 def muhasebe_fisne_cevir(df_ham):
     hk = st.session_state['hesap_kodlari']
     yevmiye = []
     for index, row in df_ham.iterrows():
         try:
-            # Dinamik sütun bulma
-            c_tutar = next((c for c in df_ham.columns if "tutar" in str(c).lower()), None)
-            c_kdv = next((c for c in df_ham.columns if "kdv" in str(c).lower()), None)
-            c_kat = next((c for c in df_ham.columns if "kategori" in str(c).lower()), None)
-            c_yer = next((c for c in df_ham.columns if "isyeri" in str(c).lower()), None)
-            c_dosya = next((c for c in df_ham.columns if "dosya" in str(c).lower()), None)
+            # Sütun adlarını normalize ederek bul
+            cols = {tr_temizle(c): c for c in df_ham.columns}
+            c_tutar = next((cols[k] for k in cols if "tutar" in k), None)
+            c_kdv = next((cols[k] for k in cols if "kdv" in k), None)
+            c_kat = next((cols[k] for k in cols if "kategori" in k), None)
+            c_isyeri = next((cols[k] for k in cols if "isyeri" in k), None)
+            c_dosya = next((cols[k] for k in cols if "dosya" in k), None)
 
             if not c_tutar: continue
 
@@ -88,15 +87,14 @@ def muhasebe_fisne_cevir(df_ham):
             matrah = toplam - kdv
             tarih = str(row.get('tarih', datetime.now().strftime('%d.%m.%Y')))
             kategori = row.get(c_kat, 'Diğer')
-            dosya_ref = row.get(c_dosya, '')
             
             gider_kodu = hk.get(kategori, hk["Diğer"])
-            aciklama = f"{kategori} - {row.get(c_yer, 'Evrak')} ({dosya_ref})" # Dosya adını açıklamaya ekle
+            aciklama = f"{kategori} - {row.get(c_isyeri, 'Evrak')}"
             
             if matrah > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": gider_kodu, "Açıklama": aciklama, "Borç": matrah, "Alacak": 0})
             if kdv > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": hk["KDV"], "Açıklama": "KDV", "Borç": kdv, "Alacak": 0})
             
-            alacak_hesabi = hk["Banka"] if "Ekstre" in str(dosya_ref) else hk["Kasa"]
+            alacak_hesabi = hk["Banka"] if "Ekstre" in str(row.get(c_dosya, '')) else hk["Kasa"]
             yevmiye.append({"Tarih": tarih, "Hesap Kodu": alacak_hesabi, "Açıklama": "Ödeme", "Borç": 0, "Alacak": toplam})
         except: continue
     return pd.DataFrame(yevmiye)
@@ -157,7 +155,7 @@ def sheete_kaydet(veri, musteri):
         try: ws = sheet.worksheet(musteri)
         except: ws = sheet.add_worksheet(musteri, 1000, 10)
         
-        # Başlık kontrolü
+        # Başlık yoksa ekle
         if not ws.row_values(1):
             ws.append_row(["Dosya Adı", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR"])
 
@@ -165,22 +163,7 @@ def sheete_kaydet(veri, musteri):
         for v in veri:
             durum = "✅" if float(str(v.get('toplam_tutar',0)).replace(',','.')) > 0 else "⚠️"
             qr_durumu = "📱QR" if v.get("qr_gecerli") else "-"
-            
-            # YENİLİK: Dosya adını standardize edilmiş haliyle kaydet
-            temiz_ad = yeni_dosya_adi_olustur(v)
-            
-            rows.append([
-                temiz_ad, # ARTIK ZİPTEKİ İSİMLE AYNI
-                v.get("isyeri_adi", "-"), 
-                v.get("fiş_no", "-"), 
-                v.get("tarih", "-"), 
-                v.get("kategori", "Diğer"), 
-                str(v.get("toplam_tutar", "0")), 
-                str(v.get("toplam_kdv", "0")), 
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                durum, 
-                qr_durumu
-            ])
+            rows.append([v.get("dosya_adi"), v.get("isyeri_adi"), v.get("fiş_no"), v.get("tarih"), v.get("kategori", "Diğer"), str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum, qr_durumu])
         ws.append_rows(rows)
         return True
     except: return False
@@ -194,14 +177,14 @@ def sheetten_veri_cek(musteri):
         data = ws.get_all_records()
         if not data: return pd.DataFrame()
         df = pd.DataFrame(data)
-        df.columns = [c.strip().lower().replace(" ", "").replace("_", "") for c in df.columns]
         
-        # Sayısal Dönüşümler
-        col_tutar = next((c for c in df.columns if "tutar" in c), None)
-        col_kdv = next((c for c in df.columns if "kdv" in c), None)
+        # SÜTUN TEMİZLİĞİ (TÜRKÇE KARAKTERLİ)
+        # Sütun isimlerini normalize edip orijinal isimleriyle eşleştiriyoruz
+        cols_map = {tr_temizle(c): c for c in df.columns}
         
-        if col_tutar: df[col_tutar] = df[col_tutar].apply(temizle_ve_sayiya_cevir)
-        if col_kdv: df[col_kdv] = df[col_kdv].apply(temizle_ve_sayiya_cevir)
+        # Tutar sütununu bul (artık "işyeri", "isyeri", "İŞYERİ" fark etmez)
+        c_tutar = next((cols_map[k] for k in cols_map if "tutar" in k), None)
+        if c_tutar: df[c_tutar] = df[c_tutar].apply(temizle_ve_sayiya_cevir)
         
         return df
     except: return pd.DataFrame()
@@ -256,10 +239,9 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis", retries=3):
 
             if mod == "fis":
                 prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
-                GÖREV:
-                1. Kategori: Firma adına aldanma, ürüne bak (Ofel Turizm -> Kitap -> Kırtasiye).
-                2. Tarih: Mutlaka GG.AA.YYYY formatında olsun.
-                JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
+                DİKKAT: Firma adına aldanma, ürüne bak.
+                JSON: {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
+                Tarih formatı Gün.Ay.Yıl olsun.
                 """
             else:
                 prompt = """Kredi kartı ekstresi satırları. JSON Liste: [{"isyeri_adi": "...", "tarih": "GG.AA.YYYY", "kategori": "...", "toplam_tutar": "0.00", "toplam_kdv": "0"}, ...]"""
@@ -273,31 +255,32 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis", retries=3):
             metin = response.json()['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
             veri = json.loads(metin)
             
-            # Dosya bilgilerini sakla
             if isinstance(veri, list):
-                for v in veri: 
-                    v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"
-                    v["qr_gecerli"] = False
+                for v in veri: v["dosya_adi"] = f"Ekstre_{dosya_objesi.name}"; v["qr_gecerli"] = False
                 return veri
             else:
                 veri["dosya_adi"] = dosya_objesi.name
                 veri["qr_gecerli"] = True if qr_data else False
                 veri["_ham_dosya"] = dosya_objesi.getvalue()
                 veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
-                
-                # YENİ: Excel ve ZIP için standardize isim burada oluşturulmuyor,
-                # çünkü tarih/tutar bilgisini henüz işlemedik. 
-                # Bunu 'arsiv_olustur' ve 'sheete_kaydet' fonksiyonlarında yapacağız.
                 return veri
         except Exception as e: return {"hata": str(e)}
     return {"hata": "Kota limiti"}
+
+def yeni_dosya_adi_olustur(veri):
+    try:
+        tarih = str(veri.get("tarih", "00.00.0000")).replace("/", ".").replace("-", ".")
+        yer = "".join([c for c in str(veri.get("isyeri_adi","Firma")).upper() if c.isalnum()])[:15]
+        tutar = str(veri.get("toplam_tutar", "0")).replace(".", ",")
+        uzanti = veri.get("_dosya_turu", "jpg")
+        return f"{tarih}_{yer}_{tutar}TL.{uzanti}"
+    except: return f"HATA_{veri.get('dosya_adi')}"
 
 def arsiv_olustur(veri_listesi):
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for veri in veri_listesi:
             if "_ham_dosya" in veri:
-                # Dosya adını standartlaştır
                 yeni_ad = yeni_dosya_adi_olustur(veri)
                 zip_file.writestr(yeni_ad, veri["_ham_dosya"])
     return zip_buffer.getvalue()
@@ -309,12 +292,15 @@ with st.sidebar:
     secili = st.selectbox("Aktif Müşteri", musteriler)
     
     with st.expander("➕ Ekle / ➖ Sil"):
+        yeni = st.text_input("Yeni Firma Adı")
         if st.button("Ekle"):
-            yeni = st.text_input("Firma Adı", key="new_c")
-            if yeni and yeni_musteri_ekle(yeni) == True: st.success("Eklendi!"); time.sleep(1); st.rerun()
+            res = yeni_musteri_ekle(yeni)
+            if res==True: st.success("Eklendi!"); time.sleep(1); st.rerun()
+            else: st.error(res)
+        sil = st.selectbox("Silinecek", [m for m in musteriler if m!="Varsayılan Müşteri"])
         if st.button("Sil"):
-            sil = st.selectbox("Silinecek", [m for m in musteriler if m!="Varsayılan Müşteri"], key="del_c")
-            if musteri_sil(sil): st.success("Silindi!"); time.sleep(1); st.rerun()
+            musteri_sil(sil)
+            st.success("Silindi!"); time.sleep(1); st.rerun()
 
     st.divider()
     modeller = modelleri_getir()
@@ -336,6 +322,7 @@ with t1:
     
     if st.button("🚀 BAŞLAT", type="primary"):
         tum = []
+        hatalar = []
         bar = st.progress(0)
         
         if fisler:
@@ -344,7 +331,8 @@ with t1:
                 completed = 0
                 for f in concurrent.futures.as_completed(futures):
                     r = f.result()
-                    if "hata" not in r: tum.append(r)
+                    if "hata" in r: hatalar.append(f"{futures[f].name}: {r['hata']}")
+                    else: tum.append(r)
                     completed += 1
                     bar.progress(completed / len(fisler))
         
@@ -353,24 +341,28 @@ with t1:
                 for d in ekstre:
                     r = gemini_ile_analiz_et(d, model, "ekstre")
                     if isinstance(r, list): tum.extend(r)
+                    elif "hata" in r: hatalar.append(f"{d.name}: {r['hata']}")
         
         if tum:
             st.session_state['analiz_sonuclari'] = tum
             if sheete_kaydet(tum, secili):
                 st.success(f"✅ {len(tum)} kayıt işlendi ve kaydedildi!")
-            else: st.error("Veritabanı hatası.")
+            else: st.error("⚠️ Veritabanı hatası.")
+        
+        if hatalar:
+            st.error("🚨 Bazı dosyalar işlenemedi:")
+            for h in hatalar: st.write(h)
 
     if 'analiz_sonuclari' in st.session_state:
         dt = st.session_state['analiz_sonuclari']
-        
-        # Ekranda gösterirken de dosya adını düzeltelim ki görünsün
+        # Dosya adını düzeltilmiş haliyle göster
         for d in dt: d["dosya_adi"] = yeni_dosya_adi_olustur(d)
         
         df = pd.DataFrame(dt)
         st.dataframe(df.drop(columns=["_ham_dosya", "_dosya_turu", "qr_data", "qr_icerigi"], errors='ignore'), use_container_width=True)
         
         col1, col2, col3 = st.columns(3)
-        with col1: st.download_button("📦 ZIP Arşiv", arsiv_olustur(dt), f"{secili}_arsiv.zip", "application/zip", type="primary")
+        with col1: st.download_button("📦 ZIP Arşiv", arsiv_olustur(dt), f"{secili}_arsiv.zip", "application/zip")
         with col2:
             buf_list = io.BytesIO()
             with pd.ExcelWriter(buf_list, engine='openpyxl') as w: 
@@ -388,40 +380,28 @@ with t2:
     df = sheetten_veri_cek(secili)
     
     if not df.empty:
-        col_tutar = next((c for c in df.columns if "tutar" in c), None)
-        col_kdv = next((c for c in df.columns if "kdv" in c), None)
-        col_kat = next((c for c in df.columns if "kategori" in c), None)
-        col_yer = next((c for c in df.columns if "isyeri" in c), None)
+        cols = {tr_temizle(c): c for c in df.columns}
+        c_tutar = next((cols[k] for k in cols if "tutar" in k), None)
+        c_kdv = next((cols[k] for k in cols if "kdv" in k), None)
+        c_kat = next((cols[k] for k in cols if "kategori" in k), None)
+        c_isyeri = next((cols[k] for k in cols if "isyeri" in k), None)
         
-        if col_tutar:
-            toplam = df[col_tutar].sum()
-            kdv_toplam = df[col_kdv].sum() if col_kdv else 0
+        if c_tutar:
+            st.metric("Toplam", f"{df[c_tutar].sum():,.2f} ₺")
             
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Toplam Harcama", f"{toplam:,.2f} ₺")
-            m2.metric("Toplam KDV", f"{kdv_toplam:,.2f} ₺")
-            m3.metric("İşlem Sayısı", len(df))
-            
-            st.divider()
-            
-            # --- GRAFİKLER ---
             g1, g2 = st.columns(2)
-            
             with g1:
-                st.subheader("Kategori Dağılımı")
-                if col_kat:
-                    fig_pie = px.pie(df, values=col_tutar, names=col_kat, hole=0.4)
-                    st.plotly_chart(fig_pie, use_container_width=True)
-            
+                if c_kat:
+                    fig = px.pie(df, values=c_tutar, names=c_kat, title="Kategori Dağılımı")
+                    st.plotly_chart(fig, use_container_width=True)
             with g2:
-                st.subheader("En Çok Harcama Yapılan 5 Yer")
-                if col_yer:
-                    top_places = df.groupby(col_yer)[col_tutar].sum().nlargest(5).reset_index()
-                    fig_bar = px.bar(top_places, x=col_yer, y=col_tutar, color=col_yer)
+                if c_isyeri:
+                    top5 = df.groupby(c_isyeri)[c_tutar].sum().nlargest(5).reset_index()
+                    fig_bar = px.bar(top5, x=c_isyeri, y=c_tutar, title="En Çok Harcanan 5 Yer")
                     st.plotly_chart(fig_bar, use_container_width=True)
-            
+                    
             st.dataframe(df, use_container_width=True)
-        else: st.warning("Veri var ama Tutar sütunu bulunamadı.")
+        else: st.warning("Tutar sütunu bulunamadı.")
     else: st.info("Veri yok.")
 
 with t3:
