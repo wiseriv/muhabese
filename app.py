@@ -17,19 +17,18 @@ from pyzbar.pyzbar import decode
 import cv2
 import numpy as np
 
-# --- 1. SAYFA AYARLARI ---
+# --- 1. AYARLAR ---
 st.set_page_config(page_title="Muhabese AI", layout="wide", page_icon="🏢")
 
-# --- 2. GÜVENLİK ---
 def giris_kontrol():
     if 'giris_yapildi' not in st.session_state: st.session_state['giris_yapildi'] = False
     if not st.session_state['giris_yapildi']:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
-            st.markdown("<h2 style='text-align: center; color: #0F52BA;'>🔐 Muhabese AI | Giriş</h2>", unsafe_allow_html=True)
+            st.markdown("## 🔐 Muhabese AI | Giriş")
             with st.form("login"):
-                sifre = st.text_input("Yönetici Şifresi", type="password")
-                if st.form_submit_button("Giriş Yap", use_container_width=True):
+                sifre = st.text_input("Şifre", type="password")
+                if st.form_submit_button("Giriş"):
                     if sifre == "12345":
                         st.session_state['giris_yapildi'] = True
                         st.rerun()
@@ -38,9 +37,9 @@ def giris_kontrol():
 giris_kontrol()
 
 API_KEY = st.secrets.get("GEMINI_API_KEY")
-if not API_KEY: st.error("Sistem Hatası: API Anahtarı Eksik."); st.stop()
+if not API_KEY: st.error("API Key Eksik!"); st.stop()
 
-# --- 3. AYARLAR VE DEĞİŞKENLER ---
+# --- 2. AYARLAR ---
 if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 if 'hesap_kodlari' not in st.session_state:
     st.session_state['hesap_kodlari'] = {
@@ -49,7 +48,7 @@ if 'hesap_kodlari' not in st.session_state:
         "KDV": "191.18", "Kasa": "100.01", "Banka": "102.01"
     }
 
-# --- 4. MOTORLAR ---
+# --- 3. MOTORLAR ---
 def temizle_ve_sayiya_cevir(deger):
     if pd.isna(deger) or deger == "": return 0.0
     try:
@@ -58,15 +57,6 @@ def temizle_ve_sayiya_cevir(deger):
         elif "," in s: s = s.replace(",", ".")
         return float(s)
     except: return 0.0
-
-def yeni_dosya_adi_olustur(veri):
-    try:
-        tarih = str(veri.get("tarih", "00.00.0000")).replace("/", ".").replace("-", ".")
-        yer = "".join([c for c in str(veri.get("isyeri_adi","Firma")).upper() if c.isalnum()])[:15]
-        tutar = str(veri.get("toplam_tutar", "0")).replace(".", ",")
-        uzanti = veri.get("_dosya_turu", "jpg")
-        return f"{tarih}_{yer}_{tutar}TL.{uzanti}"
-    except: return f"HATA_{veri.get('dosya_adi')}"
 
 def muhasebe_fisne_cevir(df_ham):
     hk = st.session_state['hesap_kodlari']
@@ -78,19 +68,17 @@ def muhasebe_fisne_cevir(df_ham):
             matrah = toplam - kdv
             tarih = str(row.get('tarih', datetime.now().strftime('%d.%m.%Y')))
             kategori = row.get('kategori', 'Diğer')
-            
             gider_kodu = hk.get(kategori, hk["Diğer"])
             aciklama = f"{kategori} - {row.get('isyeri_adi', 'Evrak')}"
             
             if matrah > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": gider_kodu, "Açıklama": aciklama, "Borç": matrah, "Alacak": 0})
             if kdv > 0: yevmiye.append({"Tarih": tarih, "Hesap Kodu": hk["KDV"], "Açıklama": "KDV", "Borç": kdv, "Alacak": 0})
-            
             alacak_hesabi = hk["Banka"] if "Ekstre" in str(row.get('dosya_adi','')) else hk["Kasa"]
             yevmiye.append({"Tarih": tarih, "Hesap Kodu": alacak_hesabi, "Açıklama": "Ödeme", "Borç": 0, "Alacak": toplam})
         except: continue
     return pd.DataFrame(yevmiye)
 
-# --- 5. GOOGLE SHEETS ---
+# --- 4. SHEETS (TOPLU YAZMA GÜNCELLEMESİ) ---
 @st.cache_resource
 def sheets_baglantisi_kur():
     if "gcp_service_account" not in st.secrets: return None
@@ -139,31 +127,38 @@ def musteri_sil(ad):
     except Exception as e: return str(e)
 
 def sheete_kaydet(veri, musteri):
+    """
+    ÖNEMLİ GÜNCELLEME: Satırları tek tek değil, TOPLU (Batch) yazar.
+    Hızı artırır, API kotası (Rate Limit) sorununu çözer.
+    """
     client = sheets_baglantisi_kur()
-    if not client: return False
+    if not client: return False, "Bağlantı hatası"
     try:
         sheet = client.open("Muhabese Veritabanı")
         try: ws = sheet.worksheet(musteri)
-        except: ws = sheet.add_worksheet(musteri, 1000, 10)
-        
-        if not ws.row_values(1):
+        except: 
+            ws = sheet.add_worksheet(musteri, 1000, 10)
             ws.append_row(["Dosya Adı", "İşyeri", "Fiş No", "Tarih", "Kategori", "Tutar", "KDV", "Zaman", "Durum", "QR"])
-
-        rows = []
+        
+        rows_to_add = []
         for v in veri:
             durum = "✅" if float(str(v.get('toplam_tutar',0)).replace(',','.')) > 0 else "⚠️"
             qr_durumu = "📱QR" if v.get("qr_gecerli") else "-"
             temiz_ad = yeni_dosya_adi_olustur(v)
             
-            rows.append([
+            rows_to_add.append([
                 temiz_ad, v.get("isyeri_adi", "-"), v.get("fiş_no", "-"), 
                 v.get("tarih", "-"), v.get("kategori", "Diğer"), 
                 str(v.get("toplam_tutar", "0")), str(v.get("toplam_kdv", "0")), 
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), durum, qr_durumu
             ])
-        ws.append_rows(rows)
-        return True
-    except: return False
+        
+        # BATCH UPDATE: Hepsini tek seferde gönder
+        if rows_to_add:
+            ws.append_rows(rows_to_add)
+            
+        return True, f"{len(rows_to_add)} kayıt eklendi"
+    except Exception as e: return False, str(e)
 
 def sheetten_veri_cek(musteri):
     client = sheets_baglantisi_kur()
@@ -180,19 +175,11 @@ def sheetten_veri_cek(musteri):
         return df
     except: return pd.DataFrame()
 
-# --- 6. GEMINI & QR ---
+# --- 5. GEMINI & QR ---
 @st.cache_data
 def modelleri_getir():
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-    try:
-        response = requests.get(url)
-        data = response.json()
-        tum = [m['name'].replace("models/", "") for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-        f25 = [m for m in tum if "2.5-flash" in m]
-        f20 = [m for m in tum if "2.0-flash" in m]
-        f15 = [m for m in tum if "1.5-flash" in m]
-        return f25 + f20 + f15 + [m for m in tum if m not in f25+f20+f15]
-    except: return ["gemini-1.5-flash"]
+    # Manuel Liste (Daha güvenli ve hızlı)
+    return ["gemini-2.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-flash"]
 
 def qr_kodu_oku_ve_filtrele(image_bytes):
     try:
@@ -200,8 +187,9 @@ def qr_kodu_oku_ve_filtrele(image_bytes):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         decoded_objects = decode(img)
         for obj in decoded_objects:
-            raw = obj.data.decode("utf-8")
-            if len(raw) > 10: return raw 
+            raw_data = obj.data.decode("utf-8")
+            if len(raw_data) > 10: return raw_data 
+            else: continue
         return None
     except: return None
 
@@ -230,7 +218,7 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis", retries=3):
 
             if mod == "fis":
                 prompt = f"""Bu belgeyi analiz et. {qr_bilgisi}
-                GÖREVLER:
+                GÖREV:
                 1. Kategori Tespiti: Firma adına aldanma, ürüne bak (Örn: Ofel Turizm -> Kitap -> Kırtasiye).
                 2. JSON Çıktı:
                 {{"isyeri_adi": "...", "fiş_no": "...", "tarih": "GG.AA.YYYY", "kategori": "Gıda/Akaryakıt/Kırtasiye/Teknoloji/Konaklama/Diğer", "toplam_tutar": "0.00", "toplam_kdv": "0.00"}}
@@ -258,7 +246,16 @@ def gemini_ile_analiz_et(dosya_objesi, secilen_model, mod="fis", retries=3):
                 veri["_dosya_turu"] = "pdf" if mime_type == "application/pdf" else "jpg"
                 return veri
         except Exception as e: return {"hata": str(e)}
-    return {"hata": "Kota limiti"}
+    return {"hata": "Kota limiti nedeniyle işlem yapılamadı."}
+
+def yeni_dosya_adi_olustur(veri):
+    try:
+        tarih = str(veri.get("tarih", "00.00.0000")).replace("/", ".").replace("-", ".")
+        yer = "".join([c for c in str(veri.get("isyeri_adi","Firma")).upper() if c.isalnum()])[:15]
+        tutar = str(veri.get("toplam_tutar", "0")).replace(".", ",")
+        uzanti = veri.get("_dosya_turu", "jpg")
+        return f"{tarih}_{yer}_{tutar}TL.{uzanti}"
+    except: return f"HATA_{veri.get('dosya_adi')}"
 
 def arsiv_olustur(veri_listesi):
     zip_buffer = io.BytesIO()
@@ -269,53 +266,42 @@ def arsiv_olustur(veri_listesi):
                 zip_file.writestr(yeni_ad, veri["_ham_dosya"])
     return zip_buffer.getvalue()
 
-# --- 7. ARAYÜZ ---
+# --- 6. ARAYÜZ ---
 with st.sidebar:
-    # --- LOGO VE BAŞLIK ALANI (YENİ TASARIM) ---
-    st.markdown("""
-        <div style="text-align: center;">
-            <h1 style="color: #0F52BA; font-size: 28px; margin-bottom: 0;">🏢 Muhabese AI</h1>
-            <p style="font-size: 14px; color: gray; margin-top: 0;">Akıllı Finans Asistanı</p>
-        </div>
-        """, unsafe_allow_html=True)
-    st.divider()
-    
-    st.markdown("### 👥 Müşteri Seçimi")
+    st.title("🏢 Muhabese AI Pro")
+    st.markdown("### 👥 Müşteri")
     musteriler = musteri_listesini_getir()
-    secili = st.selectbox("Aktif Müşteri", musteriler, label_visibility="collapsed")
+    secili = st.selectbox("Aktif Müşteri", musteriler)
     
     with st.expander("➕ Ekle / ➖ Sil"):
-        yeni = st.text_input("Yeni Firma Adı")
-        if st.button("Ekle", use_container_width=True):
-            res = yeni_musteri_ekle(yeni)
-            if res==True: st.success("Eklendi!"); time.sleep(1); st.rerun()
-            else: st.error(res)
-        
-        sil = st.selectbox("Silinecek", [m for m in musteriler if m!="Varsayılan Müşteri"])
-        if st.button("Sil", use_container_width=True):
-            musteri_sil(sil)
-            st.success("Silindi!"); time.sleep(1); st.rerun()
+        if st.button("Ekle"):
+            yeni = st.text_input("Firma Adı", key="new_c")
+            if yeni and yeni_musteri_ekle(yeni) == True: st.success("Eklendi!"); time.sleep(1); st.rerun()
+        if st.button("Sil"):
+            sil = st.selectbox("Silinecek", [m for m in musteriler if m!="Varsayılan Müşteri"], key="del_c")
+            if musteri_sil(sil): st.success("Silindi!"); time.sleep(1); st.rerun()
 
     st.divider()
     modeller = modelleri_getir()
     model = st.selectbox("AI Modeli", modeller, index=0)
-    hiz = st.slider("İşlem Hızı", 1, 20, 10) 
+    hiz = st.slider("Paralel İşlem", 1, 20, 10) 
     
-    if st.button("❌ Ekranı Temizle", use_container_width=True):
+    if st.button("❌ Temizle"):
         st.session_state['uploader_key'] += 1
         if 'analiz_sonuclari' in st.session_state: del st.session_state['analiz_sonuclari']
         st.rerun()
 
-t1, t2, t3 = st.tabs([f"📤 {secili} - Evraklar", "📊 Raporlar", "⚙️ Hesap Planı"])
+t1, t2, t3 = st.tabs([f"📤 {secili}", "📊 Rapor", "⚙️ Ayar"])
 
 with t1:
-    st.info("Fişleri veya Ekstreleri aşağıya sürükleyin.")
+    st.header("Evrak İşleme")
     c1, c2 = st.columns(2)
     with c1: fisler = st.file_uploader("Fiş / Fatura", type=['jpg','png','pdf'], accept_multiple_files=True, key=f"f_{st.session_state['uploader_key']}")
     with c2: ekstre = st.file_uploader("Ekstre", type=['pdf','jpg'], accept_multiple_files=True, key=f"e_{st.session_state['uploader_key']}")
     
-    if st.button("🚀 Analizi Başlat", type="primary", use_container_width=True):
+    if st.button("🚀 BAŞLAT", type="primary"):
         tum = []
+        hatalar = []
         bar = st.progress(0)
         
         if fisler:
@@ -325,6 +311,7 @@ with t1:
                 for f in concurrent.futures.as_completed(futures):
                     r = f.result()
                     if "hata" not in r: tum.append(r)
+                    else: hatalar.append(f"{futures[f].name}: {r['hata']}")
                     completed += 1
                     bar.progress(completed / len(fisler))
         
@@ -333,62 +320,50 @@ with t1:
                 for d in ekstre:
                     r = gemini_ile_analiz_et(d, model, "ekstre")
                     if isinstance(r, list): tum.extend(r)
+                    elif "hata" in r: hatalar.append(f"{d.name}: {r['hata']}")
         
         if tum:
             st.session_state['analiz_sonuclari'] = tum
-            if sheete_kaydet(tum, secili):
-                st.success(f"✅ {len(tum)} kayıt işlendi ve kaydedildi!")
-            else: st.error("⚠️ Kayıt hatası!")
+            # --- TOPLU YAZMA ÇAĞRISI ---
+            durum, mesaj = sheete_kaydet(tum, secili)
+            if durum:
+                st.success(f"✅ {mesaj}")
+            else:
+                st.error(f"⚠️ Veritabanı Hatası: {mesaj}")
+        
+        if hatalar:
+            st.error(f"🚨 {len(hatalar)} dosya işlenemedi:")
+            for h in hatalar: st.write(h)
 
     if 'analiz_sonuclari' in st.session_state:
         dt = st.session_state['analiz_sonuclari']
-        # Dosya adını düzeltilmiş haliyle göster
-        for d in dt: d["dosya_adi"] = yeni_dosya_adi_olustur(d)
-        
         df = pd.DataFrame(dt)
         st.dataframe(df.drop(columns=["_ham_dosya", "_dosya_turu", "qr_data", "qr_icerigi"], errors='ignore'), use_container_width=True)
         
         col1, col2, col3 = st.columns(3)
-        with col1: st.download_button("📦 ZIP Arşiv", arsiv_olustur(dt), f"{secili}_arsiv.zip", "application/zip", use_container_width=True)
+        with col1: st.download_button("📦 ZIP Arşiv", arsiv_olustur(dt), f"{secili}_arsiv.zip", "application/zip", type="primary")
         with col2:
             buf_list = io.BytesIO()
             with pd.ExcelWriter(buf_list, engine='openpyxl') as w: 
                 df.drop(columns=["_ham_dosya", "_dosya_turu", "qr_data", "qr_icerigi"], errors='ignore').to_excel(w, index=False)
-            st.download_button("📥 Basit Excel", buf_list.getvalue(), f"{secili}_liste.xlsx", use_container_width=True)
+            st.download_button("📥 Basit Excel", buf_list.getvalue(), f"{secili}_liste.xlsx")
         with col3:
             df_m = muhasebe_fisne_cevir(df)
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='openpyxl') as w: df_m.to_excel(w, index=False)
-            st.download_button("📥 Muhasebe Fişi", buf.getvalue(), f"{secili}_fiş.xlsx", type="primary", use_container_width=True)
+            st.download_button("📥 Muhasebe Fişi", buf.getvalue(), f"{secili}_fiş.xlsx")
 
 with t2:
     st.header("Yönetim Paneli")
-    if st.button("🔄 Verileri Güncelle"): st.rerun()
+    if st.button("🔄 Güncelle"): st.rerun()
     df = sheetten_veri_cek(secili)
-    
-    if not df.empty:
-        col_tutar = next((c for c in df.columns if "tutar" in c), None)
-        col_kat = next((c for c in df.columns if "kategori" in c), None)
-        col_isyeri = next((c for c in df.columns if "isyeri" in c), None)
-        
-        if col_tutar:
-            st.metric("Toplam Harcama", f"{df[col_tutar].sum():,.2f} ₺")
-            g1, g2 = st.columns(2)
-            with g1:
-                if col_kat:
-                    fig = px.pie(df, values=col_tutar, names=col_kat, title="Kategori Dağılımı", hole=0.4)
-                    st.plotly_chart(fig, use_container_width=True)
-            with g2:
-                if col_isyeri:
-                    top5 = df.groupby(col_isyeri)[col_tutar].sum().nlargest(5).reset_index()
-                    fig_bar = px.bar(top5, x=col_isyeri, y=col_tutar, title="En Çok Harcanan Yerler")
-                    st.plotly_chart(fig_bar, use_container_width=True)
-            st.dataframe(df, use_container_width=True)
-        else: st.warning("Veri var ama Tutar sütunu bulunamadı.")
+    if not df.empty and 'tutar' in df.columns:
+        st.metric("Toplam", f"{df['tutar'].sum():,.2f} ₺")
+        st.dataframe(df, use_container_width=True)
     else: st.info("Veri yok.")
 
 with t3:
-    st.header("Hesap Planı Ayarları")
+    st.header("Ayarlar")
     hk = st.session_state['hesap_kodlari']
     c1, c2 = st.columns(2)
     with c1:
@@ -402,4 +377,4 @@ with t3:
         hk["Diğer"] = st.text_input("Diğer", hk["Diğer"])
         hk["Kasa"] = st.text_input("Kasa", hk["Kasa"])
         hk["Banka"] = st.text_input("Banka", hk["Banka"])
-    if st.button("Kaydet"): st.success("Ayarlar Kaydedildi!")
+    if st.button("Kaydet"): st.success("Kaydedildi!")
