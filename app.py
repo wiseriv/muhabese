@@ -30,7 +30,7 @@ def giris_kontrol():
             with st.form("login"):
                 sifre = st.text_input("Şifre", type="password")
                 if st.form_submit_button("Giriş Yap", use_container_width=True):
-                    if sifre == "12345":
+                    if sifre == "123456":
                         st.session_state['giris_yapildi'] = True
                         st.rerun()
                     else: st.error("Hatalı Şifre")
@@ -426,3 +426,4 @@ with t3:
     with c1: hk["Gıda"]=st.text_input("Gıda", hk["Gıda"]); hk["Ulaşım"]=st.text_input("Ulaşım", hk["Ulaşım"])
     with c2: hk["KDV"]=st.text_input("KDV", hk["KDV"]); hk["Kasa"]=st.text_input("Kasa", hk["Kasa"])
     if st.button("Kaydet"): st.success("Kaydedildi!")
+
